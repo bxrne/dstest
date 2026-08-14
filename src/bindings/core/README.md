@@ -60,6 +60,7 @@ local subject = dstest.setup(docker_config, {
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `image` | string | Yes | Container image to pull and run (pin by digest for reproducibility) |
+| `runtime` | string | No | OCI runtime for container execution (e.g. `"dtrun"`). **Required (`runtime = "dtrun"`) for deterministic process execution and workload timing across runs.** |
 | `ports` | table | No | Container ports to expose; host side is **ephemeral** (Docker-assigned), first port's mapping is used for `http`/`tcp` |
 | `volumes` | table | No | Array of bind mounts (`host:container[:options]`). Host path must be absolute. |
 | `env` | table | No | Key-value table of environment variables |

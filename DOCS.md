@@ -30,6 +30,7 @@ others are namespaced under sub-tables.
 | `dstest.inspect`, `dstest.logs`, `dstest.exec` | container introspection | [`src/bindings/subs/README.md`](src/bindings/subs/README.md) |
 | `dstest.pg.connect`, `dstest.pg.query`, `dstest.pg.close` | PostgreSQL | [`src/bindings/pg/README.md`](src/bindings/pg/README.md) |
 | `dstest.clock`, `dstest.clock.now`, `dstest.clock.virtual` | timestamps, virtual clocks | [`src/bindings/clock/README.md`](src/bindings/clock/README.md) |
+| `dstest.storage.*` | virtual disk faults | [`src/bindings/storage/README.md`](src/bindings/storage/README.md) |
 | `dstest.random.*` | seeded reproducible randomness | [`src/bindings/random/README.md`](src/bindings/random/README.md) |
 | `dstest.workload.http`, `dstest.workload.pg` | sustained HTTP/PG traffic with stats | [`src/bindings/workload/README.md`](src/bindings/workload/README.md) |
 | `dstest.debug`, `dstest.info`, `dstest.warn`, `dstest.error` | logging | [`src/bindings/log/README.md`](src/bindings/log/README.md) |
@@ -38,11 +39,13 @@ others are namespaced under sub-tables.
 
 `dstest.config({...})` registers a named configuration and returns a **handle**.
 `dstest.setup(handle, {...})` creates a subject linked to that config (and its
-substrate). Multiple configs can coexist; `dstest.dst.step()` /
-`dstest.dst.run_steps()` accept an optional config handle when more than one is
-registered. `dstest.setup`'s `depends` field waits for upstream subjects to
-reach a running state (reported by the substrate) before creating the dependent
-subject.
+substrate). The setup options table accepts `image`, optional OCI `runtime`
+(e.g. `"dtrun"`, `"runc"`, `"crun"`, `"gvisor"`), `ports`, `volumes`, `env`,
+`cmd`, `clock`, `network`, `storage`, and `depends`. Multiple configs can
+coexist; `dstest.dst.step()` / `dstest.dst.run_steps()` accept an optional
+config handle when more than one is registered. `dstest.setup`'s `depends`
+field waits for upstream subjects to reach a running state (reported by the
+substrate) before creating the dependent subject.
 
 ## Default Weights
 
@@ -78,7 +81,7 @@ function of the config's `seed`, `weights`, `steps`, and subject set:
 
 ```lua
 local cfg = dstest.config({ substrate = "docker", seed = 42, steps = 10 })
-local s = dstest.setup(cfg, { image = "kennethreitz/httpbin", ports = { 80 } })
+local s = dstest.setup(cfg, { image = "kennethreitz/httpbin", runtime = "dtrun", ports = { 80 } })
 local results = dstest.dst.run_steps(10)
 -- re-running this script with seed 42 yields the identical fault sequence
 ```
@@ -91,9 +94,9 @@ Guaranteed reproducible for a given seed:
   sorted, so schedules do not depend on map ordering;
 - Lua's `math.random` (seeded from `seed` via `math.randomseed`).
 
-Not guaranteed on the Docker substrate (subjects are real processes): the
-subject's internal thread scheduling, wall-clock timing, and any
-container-image drift (pin images by digest to avoid it).
+> [!IMPORTANT]
+> **Deterministic Execution & Workloads (`dtrun`)**
+> Standard process execution on Docker (`runc`) is non-deterministic due to OS thread scheduling variance, wall-clock timing, and I/O timing. To ensure that service execution and workload timing are completely deterministic across runs, subjects must be created using the [`dtrun`](https://github.com/bxrne/dtrun) OCI runtime (`runtime = "dtrun"`). Pin container images by digest to prevent image drift.
 
 ## Exit codes
 

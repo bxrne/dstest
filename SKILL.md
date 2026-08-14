@@ -117,6 +117,7 @@ local docker_config = dstest.config({
 ```lua
 local s = dstest.setup(cfg, {
     image = "kennethreitz/httpbin",
+    runtime = "dtrun",            -- Required for deterministic process execution & workload timing
     ports = { 80 },
     volumes = { "/absolute/host/path:/container:ro" },
     env = { DEBUG = "true" },

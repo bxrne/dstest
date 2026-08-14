@@ -44,7 +44,19 @@ cargo run
 
 ## Overview
 
-dstest lets you write Lua scripts that define test subjects (Docker containers), inject faults (pause, kill, resource deprivation, proxied network impairments), and verify service resilience: including virtual clocks for time-dependent logic, seeded workload randomness, `depends` for multi-service startup ordering, and sustained workload generation from OpenAPI specs. All experiments are deterministic when seeded, making them reproducible across runs.
+dstest lets you write Lua scripts that define test subjects (Docker containers), inject faults (pause, kill, resource deprivation, proxied network impairments), and verify service resilience: including virtual clocks for time-dependent logic, seeded workload randomness, `depends` for multi-service startup ordering, and sustained workload generation from OpenAPI specs.
+
+> [!IMPORTANT]
+> **Deterministic Execution & Workloads**
+> While fault selection and schedule generation are seed-deterministic, standard container execution under default runtimes (`runc`) is subject to OS process/thread scheduling variance and wall-clock timing jitter. To make container execution and workload timing fully deterministic across runs, subjects must be configured with the [`dtrun`](https://github.com/bxrne/dtrun) OCI runtime:
+>
+> ```lua
+> local s = dstest.setup(cfg, {
+>     image = "my-service:latest",
+>     runtime = "dtrun", -- Enables deterministic execution via dtrun
+>     ports = { 8080 },
+> })
+> ```
 
 ## Examples
 

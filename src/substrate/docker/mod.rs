@@ -143,6 +143,7 @@ impl Default for DockerLogOpts {
 #[derive(Clone, Debug)]
 pub struct DockerSubjectData {
     pub image: String,
+    pub runtime: Option<String>,
     pub cmd: Option<Vec<String>>,
     pub ports: Option<Vec<u16>>,
     pub volumes: Option<Vec<String>>,
@@ -166,6 +167,7 @@ impl Substrate for Docker {
         let image: String = table
             .get("image")
             .map_err(|_| "setup requires `image` field".to_string())?;
+        let runtime: Option<String> = table.get("runtime").ok();
         let ports: Option<Vec<u16>> = table.get("ports").ok();
         let cmd: Option<Vec<String>> = table.get("cmd").ok();
         let volumes: Option<Vec<String>> = table.get("volumes").ok();
@@ -204,6 +206,7 @@ impl Substrate for Docker {
 
         Ok(DockerSubjectData {
             image,
+            runtime,
             cmd,
             ports,
             volumes,
@@ -269,6 +272,7 @@ impl Substrate for Docker {
                     .as_ref()
                     .map(|ports| ports.iter().map(|p| format!("{}/tcp", p)).collect()),
                 host_config: Some(HostConfig {
+                    runtime: data.runtime.clone(),
                     // Host port "0" => Docker assigns an ephemeral port, so
                     // multiple subjects (and parallel experiments) never collide.
                     port_bindings: data.ports.as_ref().map(|ports| {
@@ -1100,5 +1104,32 @@ mod tests {
         assert!(source.is_some(), "no root mount source found in mountinfo");
         let source = source.unwrap();
         assert!(!source.is_empty());
+    }
+
+    #[test]
+    fn test_parse_subject_runtime() {
+        let lua = mlua::Lua::new();
+        let table = lua.create_table().unwrap();
+        table.set("image", "alpine").unwrap();
+        table.set("runtime", "dtrun").unwrap();
+
+        let docker = Docker {
+            connection: BollardDocker::connect_with_local_defaults().unwrap_or_else(|_| {
+                // Dummy client fallback for non-docker test environments
+                BollardDocker::connect_with_http_defaults().unwrap()
+            }),
+            original_limits: Mutex::new(HashMap::new()),
+            clock: DockerClock::new(BollardDocker::connect_with_http_defaults().unwrap()),
+            network: DockerNetwork::new(BollardDocker::connect_with_http_defaults().unwrap()),
+            storage: DockerStorage::new(),
+        };
+
+        let parsed = docker.parse_subject(&table).unwrap();
+        assert_eq!(parsed.runtime.as_deref(), Some("dtrun"));
+
+        let table_default = lua.create_table().unwrap();
+        table_default.set("image", "alpine").unwrap();
+        let parsed_default = docker.parse_subject(&table_default).unwrap();
+        assert_eq!(parsed_default.runtime, None);
     }
 }
