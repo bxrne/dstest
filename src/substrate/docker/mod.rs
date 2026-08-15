@@ -819,25 +819,43 @@ impl Docker {
 
         match tier {
             crate::fault::Tier::Disk => {
-                let device = Self::root_block_device()
-                    .or_else(Self::fallback_block_device)
-                    .ok_or_else(|| {
-                        "could not resolve a throttleable block device for disk fault".to_string()
-                    })?;
+                info!("Applying OCI storage I/O fault for container id={}", id);
 
-                info!("Throttling disk I/O for container id={} on {}", id, device);
-                let update_config = ContainerUpdateBody {
+                // `blkio_weight` is a device-agnostic OCI block-IO fault: it
+                // throttles the container's I/O scheduling weight relative to
+                // its peers. It needs no host block-device resolution, so it
+                // works on any substrate — including a podman/docker machine VM
+                // where the orchestrator runs on macOS and the container's
+                // backing device is not visible from the host.
+                let mut update_config = ContainerUpdateBody {
                     blkio_weight: Some(50),
-                    blkio_device_read_bps: Some(vec![ThrottleDevice {
-                        path: Some(device.clone()),
-                        rate: Some(1024 * 1024),
-                    }]),
-                    blkio_device_write_bps: Some(vec![ThrottleDevice {
-                        path: Some(device),
-                        rate: Some(1024 * 1024),
-                    }]),
                     ..Default::default()
                 };
+
+                // Best-effort absolute bandwidth cap (1MB/s). cgroup v2
+                // `io.max` only accepts whole-device major:minor pairs, so this
+                // requires a resolvable host block device. Skip it silently when
+                // one can't be found instead of failing the whole experiment.
+                if let Some(device) = Self::root_block_device().or_else(Self::fallback_block_device)
+                {
+                    info!(
+                        "Capping disk I/O for container id={} on {} to 1MB/s",
+                        id, device
+                    );
+                    update_config.blkio_device_read_bps = Some(vec![ThrottleDevice {
+                        path: Some(device.clone()),
+                        rate: Some(1024 * 1024),
+                    }]);
+                    update_config.blkio_device_write_bps = Some(vec![ThrottleDevice {
+                        path: Some(device),
+                        rate: Some(1024 * 1024),
+                    }]);
+                } else {
+                    debug!(
+                        "no throttleable host block device resolved; applying weight-only disk fault"
+                    );
+                }
+
                 self.connection
                     .update_container(&id, update_config)
                     .await
@@ -1100,6 +1118,11 @@ mod tests {
     /// `root_mount_source` must find a non-empty source path for the root mount.
     #[test]
     fn test_root_mount_source_present() {
+        // `/proc/self/mountinfo` only exists on Linux; skip elsewhere (e.g. a
+        // macOS podman/docker machine host).
+        if fs::read_to_string("/proc/self/mountinfo").is_err() {
+            return;
+        }
         let source = Docker::root_mount_source();
         assert!(source.is_some(), "no root mount source found in mountinfo");
         let source = source.unwrap();

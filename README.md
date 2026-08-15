@@ -87,7 +87,9 @@ Then instruct your assistant to "use the dstest skill" when writing or debugging
 
 ## Requirements
 
-- Docker daemon running
+- A Docker-compatible daemon reachable over `DOCKER_HOST` (Docker or Podman
+  with `DOCKER_HOST` pointed at the Podman socket; `docker` may be aliased to
+  `podman`)
 - Rust 1.85+ (uses 2024 edition)
 
 ## License

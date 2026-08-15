@@ -21,6 +21,7 @@
 
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::time::Duration;
 
 use bollard::Docker as BollardDocker;
 use bollard::models::{ContainerCreateBody, HostConfig};
@@ -312,14 +313,23 @@ impl NetworkControl for DockerNetwork {
             id.0, a.id, target, addr
         );
 
-        // Wait for socat to be ready (it installs packages on startup).
+        // Wait for socat to be ready (it installs packages on startup). Bound
+        // each connection attempt so an unreachable proxy bridge IP (e.g. on a
+        // podman/docker machine VM where the host can't dial container IPs)
+        // cannot hang the whole experiment.
         let ready_addr = format!("{}:{}", proxy_ip, port);
-        for attempt in 0..60 {
-            if tokio::net::TcpStream::connect(&ready_addr).await.is_ok() {
+        for attempt in 0..10 {
+            let connected = tokio::time::timeout(
+                Duration::from_millis(500),
+                tokio::net::TcpStream::connect(&ready_addr),
+            )
+            .await
+            .is_ok_and(|r| r.is_ok());
+            if connected {
                 debug!("proxy ready after {} attempts", attempt + 1);
                 break;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            tokio::time::sleep(Duration::from_millis(500)).await;
         }
 
         self.links.lock().expect("poisoned links lock").insert(

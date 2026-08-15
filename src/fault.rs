@@ -263,8 +263,10 @@ mod tests {
     /// The schedule length comes from config, not from the RNG.
     #[test]
     fn test_total_steps_from_config() {
-        let mut config = Config::default();
-        config.steps = 7;
+        let config = Config {
+            steps: 7,
+            ..Default::default()
+        };
         let mut tree = FaultTree::new(42, test_subjects(), &config);
         let count = std::iter::from_fn(|| tree.step()).count();
         assert_eq!(count, 7);

@@ -10,13 +10,18 @@ Returns container metadata and runtime state.
 ```lua
 local info = dstest.inspect(subject)
 assert(info.state == "running", "container should be running")
+
+-- Dial the host-mapped address when the bridge IP is not reachable from the
+-- orchestrator (e.g. podman/docker machine on macOS):
+local addr = info.host or info.ip
 ```
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `state` | string | `"running"`, `"paused"`, `"exited"`, or `"dead"` |
 | `pid` | number? | Process ID |
-| `ip` | string? | Container IP address |
+| `ip` | string? | Container IP address (bridge network) |
+| `host` | string? | Host-mapped `host:port` address (present when ports are published). Dial this from the orchestrator process — the bridge `ip` is not always reachable from the host (e.g. a podman/docker machine VM) |
 | `memory_limit` | number? | Memory limit in bytes |
 | `cpu_quota` | number? | CPU quota (0.0-1.0) |
 

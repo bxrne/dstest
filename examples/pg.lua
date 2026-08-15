@@ -16,15 +16,19 @@ local s = dstest.setup(docker_config, {
 	},
 })
 
--- Get the container's bridge IP for a direct connection
+-- Get the container's address. `host` is the host-mapped address (host:port)
+-- that the host process can dial even when the bridge IP is not directly
+-- reachable (e.g. a podman/docker machine VM). Fall back to the bridge `ip`
+-- when no port mapping exists.
 local info = dstest.inspect(s)
-dstest.info("container IP: " .. tostring(info.ip))
+local host_addr = info.host or info.ip
+dstest.info("connecting via host addr: " .. tostring(host_addr) .. " (ip: " .. tostring(info.ip) .. ")")
 
 -- Give Postgres time to finish its boot cycle
 dstest.info("waiting for database boot...")
 dstest.exec(s, { "sleep", "3" })
 
-local conn_str = string.format("postgres://postgres:password@%s:5432/test_db", info.ip)
+local conn_str = string.format("postgres://postgres:password@%s/test_db", host_addr)
 dstest.info("connecting: " .. conn_str)
 
 local pool = dstest.pg.connect(conn_str, 5)

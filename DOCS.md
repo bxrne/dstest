@@ -47,6 +47,24 @@ config handle when more than one is registered. `dstest.setup`'s `depends`
 field waits for upstream subjects to reach a running state (reported by the
 substrate) before creating the dependent subject.
 
+## Podman / Docker-machine hosts
+
+dstest talks to the Docker API over `DOCKER_HOST` (via [bollard](https://crates.io/crates/bollard)),
+so it works unchanged against Podman when `DOCKER_HOST` points at the Podman
+socket (and `docker` is aliased to `podman`).
+
+One gotcha: on a podman/docker *machine* VM (e.g. Podman Machine on macOS) the
+container's bridge `ip` is **not** reachable from the macOS host process. Use
+the host-mapped `host` address returned by `dstest.inspect` (it is
+`host:port`, derived from the published port) to dial services from the
+orchestrator — `examples/pg.lua` does exactly this. Likewise, the proxied
+network link's readiness probe is bounded so it cannot hang when the host
+cannot reach the proxy's bridge IP.
+
+All faults are container/OCI-level (pause, kill, network disconnect, memory,
+CPU, and an OCI `blkio` storage fault for disk), so none of them depend on
+resolving a host block device — they run under Podman Machine too.
+
 ## Default Weights
 
 | Fault | Weight |
@@ -69,7 +87,7 @@ substrate) before creating the dependent subject.
 |-------|--------|
 | `pause` | Freezes the container (cgroups freeze) |
 | `kill` | Kills the container (SIGKILL) |
-| `deprive:disk` | Throttles disk I/O to 1MB/s, 50% blkio weight |
+| `deprive:disk` | OCI block-IO fault: drops the container's blkio weight to 50 (plus a best-effort 1MB/s per-device read/write cap when a throttleable host device resolves) |
 | `deprive:network` | Disconnects from bridge network (no internet) |
 | `deprive:memory` | Reduces memory limit to 50% of current (min 64MB) |
 | `deprive:cpu` | Limits CPU to 20% quota |
