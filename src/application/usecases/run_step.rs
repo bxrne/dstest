@@ -112,7 +112,7 @@ pub async fn run_step<S: Substrate>(
     let fault_str = step_result.fault.to_string();
     {
         let mut s = state.lock().expect("poisoned engine state lock");
-            s.subjects.push_fault(&step_result.subject_id, step_result.fault);
+        s.subjects.push_fault(&step_result.subject_id, step_result.fault);
         s.subjects.mark_faulted(&step_result.subject_id);
         s.log.push(ExperimentEvent::FaultApplied {
             fault: step_result.fault,
