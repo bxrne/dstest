@@ -26,7 +26,7 @@ cargo install --path .
 
 | Command | Purpose |
 |---------|---------|
-| `cat examples/httpbin.lua \| cargo run` | Run a script via stdin |
+| `cat examples/oracle.lua \| cargo run` | Run a script via stdin |
 | `dstest < script.lua` | Run script (after install) |
 | `cargo test` | Run test suite |
 | `cargo clippy -- -D warnings` | Lint gate (CI-enforced) |
