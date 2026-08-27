@@ -130,5 +130,6 @@ Guaranteed reproducible for a given seed:
 | File | Demonstrates |
 |------|--------------|
 | [`examples/oracle.lua`](examples/oracle.lua) | Fault injection with oracle predicates and invariants |
+| [`examples/httpbin.lua`](examples/httpbin.lua) | httpbin smoke: check a route, cut the link, verify failure, heal, verify recovery |
 | [`examples/link.lua`](examples/link.lua) | Proxied network faults: latency, loss, partitions between subjects |
 | [`examples/pg.lua`](examples/pg.lua) | PostgreSQL: connect, create table, insert, query, close |
