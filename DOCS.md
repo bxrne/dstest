@@ -6,8 +6,8 @@ dstest reads a Lua script from stdin. Pipe in a script file or type interactivel
 
 ```bash
 # Run a script file
-dstest < examples/httpbin.lua
-cat examples/httpbin.lua | dstest
+dstest < examples/oracle.lua
+cat examples/oracle.lua | dstest
 
 # REPL mode: run dstest with no redirect, type your script, press Ctrl+D to execute
 dstest
