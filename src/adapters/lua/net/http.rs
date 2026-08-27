@@ -9,8 +9,8 @@ use crate::ports::Substrate;
 
 /// Resolve a subject id to its reachable address plus the HTTP settings of
 /// the config it was created under.
-pub fn resolve_subject_http<S: Substrate>(
-    state: &AppState<S>,
+pub fn resolve_subject_http(
+    state: &AppState,
     id: &str,
 ) -> mlua::Result<(String, u64, u32, u64)> {
     let host = state

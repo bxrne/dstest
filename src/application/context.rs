@@ -13,7 +13,7 @@ use crate::application::state::AppState;
 use crate::ports::Substrate;
 
 pub struct BindingContext<S: Substrate> {
-    pub state: Arc<Mutex<AppState<S>>>,
+    pub state: Arc<Mutex<AppState>>,
     pub oracle: Arc<Mutex<CheckRunner>>,
     pub substrate: Arc<S>,
     /// Seeded workload RNG for `dstest.random.*` (separate stream from the

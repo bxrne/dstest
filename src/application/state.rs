@@ -7,47 +7,37 @@
 //! methods instead of mutating raw maps.
 
 use std::collections::BTreeMap;
+use std::time::Instant;
 
 use crate::application::log::EventLog;
 use crate::domain::config::Config;
 use crate::domain::fault::{Fault, FaultTree};
 
 /// A hosted subject and everything the engine needs to remember about it.
-pub struct SubjectRecord<D> {
+pub struct SubjectRecord {
     /// Fully-qualified subject id, e.g. `"docker/<container_id>"`.
     pub id: String,
     /// Engine-assigned name passed to the substrate (e.g. container name).
     pub name: String,
     /// Handle of the `dstest.config` this subject was created under.
     pub config: String,
-    /// Substrate-specific setup data, retained for future re-host semantics
-    /// (e.g. clear-by-recreate when a fault cannot be undone in place).
-    #[allow(dead_code)]
-    pub data: D,
-    /// Faults currently applied to this subject (for observability and
-    /// future fault TTLs).
+    /// Faults currently applied to this subject (for observability).
     pub active_faults: Vec<Fault>,
+    /// Instant the most recent fault was applied to this subject, used to
+    /// measure recovery duration when the fault is cleared.
+    pub faulted_at: Option<Instant>,
 }
 
 /// Owns the set of live subjects and the address map. Single owner of the
 /// "what is running" invariant, instead of several hand-kept collections.
-pub struct SubjectRegistry<D> {
-    subjects: Vec<SubjectRecord<D>>,
+#[derive(Default)]
+pub struct SubjectRegistry {
+    subjects: Vec<SubjectRecord>,
     hosts: BTreeMap<String, String>,
     name_counter: usize,
 }
 
-impl<D> Default for SubjectRegistry<D> {
-    fn default() -> Self {
-        Self {
-            subjects: Vec::new(),
-            hosts: BTreeMap::new(),
-            name_counter: 0,
-        }
-    }
-}
-
-impl<D> SubjectRegistry<D> {
+impl SubjectRegistry {
     /// Generate the next monotonic subject name for a config handle.
     pub fn next_name(&mut self, handle: &str) -> String {
         self.name_counter += 1;
@@ -68,18 +58,18 @@ impl<D> SubjectRegistry<D> {
     }
 
     /// Register a hosted subject, recording the id -> address mapping.
-    pub fn add(&mut self, subject: SubjectRecord<D>, host: Option<String>) {
+    pub fn add(&mut self, subject: SubjectRecord, host: Option<String>) {
         if let Some(addr) = host {
             self.hosts.insert(subject.id.clone(), addr);
         }
         self.subjects.push(subject);
     }
 
-    pub fn find(&self, id: &str) -> Option<&SubjectRecord<D>> {
+    pub fn find(&self, id: &str) -> Option<&SubjectRecord> {
         self.subjects.iter().find(|r| r.id == id)
     }
 
-    pub fn find_mut(&mut self, id: &str) -> Option<&mut SubjectRecord<D>> {
+    pub fn find_mut(&mut self, id: &str) -> Option<&mut SubjectRecord> {
         self.subjects.iter_mut().find(|r| r.id == id)
     }
 
@@ -105,9 +95,22 @@ impl<D> SubjectRegistry<D> {
         }
     }
 
+    /// Record the moment a fault was applied to a subject.
+    pub fn mark_faulted(&mut self, id: &str) {
+        if let Some(rec) = self.find_mut(id) {
+            rec.faulted_at = Some(Instant::now());
+        }
+    }
+
+    /// When this subject's most recent fault was applied, if any.
+    pub fn faulted_at(&self, id: &str) -> Option<Instant> {
+        self.find(id).and_then(|r| r.faulted_at)
+    }
+
     pub fn clear_faults(&mut self, id: &str) {
         if let Some(rec) = self.find_mut(id) {
             rec.active_faults.clear();
+            rec.faulted_at = None;
         }
     }
 
@@ -197,14 +200,14 @@ impl FaultTreeRegistry {
 }
 
 /// The composed application state behind the engine.
-pub struct AppState<S: crate::ports::Substrate> {
+pub struct AppState {
     pub log: EventLog,
-    pub subjects: SubjectRegistry<S::SubjectData>,
+    pub subjects: SubjectRegistry,
     pub configs: ConfigRegistry,
     pub fault_trees: FaultTreeRegistry,
 }
 
-impl<S: crate::ports::Substrate> Default for AppState<S> {
+impl Default for AppState {
     fn default() -> Self {
         Self {
             log: EventLog::new(),

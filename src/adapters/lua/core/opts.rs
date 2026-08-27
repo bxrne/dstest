@@ -4,6 +4,7 @@ use mlua::{Lua, Result, Table};
 
 use crate::application::context::BindingContext;
 use crate::domain::config::Config;
+use crate::domain::event::ExperimentEvent;
 use crate::ports::Substrate;
 use crate::ports::components::{NetworkControl, StorageControl};
 
@@ -104,6 +105,7 @@ pub fn register<S: Substrate>(lua: &Lua, dstest: &Table, ctx: &BindingContext<S>
         }
 
         state.configs.register(handle.clone(), cfg);
+        state.log.push(ExperimentEvent::ConfigRegistered);
 
         Ok(handle)
     })?;
