@@ -10,7 +10,7 @@ mod domain;
 mod ports;
 
 use std::io::{Read, stdin};
-use tracing::{debug, error};
+use tracing::{debug, error, info};
 
 fn main() {
     tracing_subscriber::fmt::init();
@@ -47,17 +47,44 @@ fn main() {
         match result {
             Ok(()) => {
                 let report = engine.oracle_report();
-                let metrics = engine.metrics();
-                debug!(
-                    "Experiment complete: {} scenarios, {} faults, {} unique states, {} recoveries ({} failures), report={}/{}/{}",
-                    metrics.scenarios,
-                    metrics.faults_injected,
-                    metrics.unique_states,
-                    metrics.recoveries,
-                    metrics.failures,
+                let m = engine.metrics();
+                let blast = engine.blast_radius();
+                info!(
+                    "scenarios={} unique_states={} unique_interleavings={} simulated_time_ms={} \
+                     faults={} max_fault_depth={} fault_classes={} recoveries={} failures={} \
+                     recovery_time_ms={} checks_passed={} checks_failed={}",
+                    m.scenarios,
+                    m.unique_states,
+                    m.unique_interleavings,
+                    m.simulated_time.as_millis(),
+                    m.faults_injected,
+                    m.max_fault_depth,
+                    m.classes_seen,
+                    m.recoveries,
+                    m.failures,
+                    m.total_recovery_time.as_millis(),
                     report.passed_checks,
                     report.failed_checks,
-                    report.total_checks,
+                );
+                let fmt_ratio =
+                    |t: &crate::application::log::Totals| match t.ratio() {
+                        Some(r) => format!("{:.2}", r),
+                        None => "-".to_string(),
+                    };
+                info!(
+                    "blast_radius nodes={}/{} ({}) services={}/{} ({}) clients={}/{} ({}) requests={}/{} ({})",
+                    blast.nodes.affected,
+                    blast.nodes.total,
+                    fmt_ratio(&blast.nodes),
+                    blast.services.affected,
+                    blast.services.total,
+                    fmt_ratio(&blast.services),
+                    blast.clients.affected,
+                    blast.clients.total,
+                    fmt_ratio(&blast.clients),
+                    blast.requests.affected,
+                    blast.requests.total,
+                    fmt_ratio(&blast.requests),
                 );
                 if report.total_checks > 0 && !report.passed {
                     error!(

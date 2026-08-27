@@ -6,12 +6,11 @@
 //! registry — are projections over this log, so there is a single source of
 //! truth and no hand-synced duplicate state.
 //!
-//! The vocabulary is the forward-looking contract: use cases emit a subset of
-//! variants today, and projections read a subset of fields, with the rest
-//! landing as scenarios and observability features are wired. Dead-code is
-//! allowed module-wide so the designed surface is not mistaken for cruft.
-
-#![allow(dead_code)]
+//! Every variant has a producer in the application use cases: the projections
+//! ([`crate::application::log::Metrics`],
+//! [`crate::application::log::BlastRadius`],
+//! [`crate::domain::oracle::OracleReport`]) fold exactly these events into
+//! their read models, so the log is the single source of truth.
 
 use std::time::Duration;
 
@@ -43,35 +42,33 @@ impl From<Fault> for FaultClass {
 }
 
 /// One observed fact about the experiment run.
+///
+/// Each variant carries exactly the fields its read models consume, so the
+/// vocabulary stays lean and every field is consumed by a projection
+/// ([`crate::application::log::Metrics`],
+/// [`crate::application::log::BlastRadius`],
+/// [`crate::domain::oracle::OracleReport`]).
 #[derive(Clone, Debug)]
 pub enum ExperimentEvent {
-    /// A config was registered under a handle.
-    ConfigRegistered { handle: String },
+    /// A config was registered (marker: the handle is not consumed by any
+    /// projection, so it is not carried).
+    ConfigRegistered,
     /// A scenario (the main script body) started.
     ScenarioStarted,
     /// A scenario completed successfully.
     ScenarioCompleted,
     /// A subject was hosted.
-    SubjectHosted {
-        id: String,
-        config: String,
-        name: String,
-    },
+    SubjectHosted,
     /// A subject was torn down.
-    SubjectTornDown { id: String },
+    SubjectTornDown,
     /// A new unique engine state was enumerated during a scenario.
     StateEnumerated { unique: bool },
     /// A new unique interleaving was enumerated during a scenario.
     InterleavingEnumerated { unique: bool },
-    /// A fault was applied to a subject on a config.
-    FaultApplied {
-        step: usize,
-        subject: String,
-        config: String,
-        fault: Fault,
-    },
+    /// A fault was applied to a subject.
+    FaultApplied { fault: Fault },
     /// A fault was cleared from a subject.
-    FaultCleared { subject: String },
+    FaultCleared,
     /// A subject was recovered (or failed to recover) after a fault.
     Recovery { took: Duration, ok: bool },
     /// Blast radius: how many targets of a class were affected out of total.

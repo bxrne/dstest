@@ -16,9 +16,9 @@ pub struct Metrics {
     pub scenarios: u64,
     pub unique_states: u64,
     pub unique_interleavings: u64,
-    /// Part of the designed metrics vocabulary; produced once clock/recovery
-    /// events feed it, so it sits at zero (and is not treated as dead) for now.
-    #[allow(dead_code)]
+    /// Sum of recovery durations across all `Recovery` events, whether or not
+    /// the recovery succeeded. Represents the time a run spent in fault
+    /// handling.
     pub simulated_time: Duration,
 
     // Faults
@@ -37,10 +37,7 @@ pub struct Metrics {
 }
 
 impl Metrics {
-    /// Fold a slice of events into metrics. Used for standalone testing and
-    /// for deriving metrics purely from the log when a hot instance is not
-    /// needed.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn from_events(events: &[ExperimentEvent]) -> Self {
         let mut m = Self::default();
         for ev in events {
@@ -75,10 +72,11 @@ impl Metrics {
                 self.classes_mask |= bit;
                 self.classes_seen = self.classes_mask.count_ones() as u64;
             }
-            ExperimentEvent::FaultCleared { .. } => {
+            ExperimentEvent::FaultCleared => {
                 self.active_faults = self.active_faults.saturating_sub(1);
             }
             ExperimentEvent::Recovery { ok, took } => {
+                self.simulated_time += *took;
                 if *ok {
                     self.recoveries += 1;
                     self.total_recovery_time += *took;
@@ -93,7 +91,7 @@ impl Metrics {
 
 /// Per-target-class blast radius (affected out of total), derived from
 /// `BlastAffected` events.
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Clone)]
 pub struct BlastRadius {
     pub nodes: Totals,
     pub services: Totals,
@@ -102,7 +100,7 @@ pub struct BlastRadius {
 }
 
 impl BlastRadius {
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn from_events(events: &[ExperimentEvent]) -> Self {
         let mut b = Self::default();
         for ev in events {
@@ -139,7 +137,6 @@ pub struct Totals {
 }
 
 impl Totals {
-    #[allow(dead_code)]
     pub fn ratio(&self) -> Option<f64> {
         if self.total == 0 {
             None
@@ -178,9 +175,7 @@ impl EventLog {
         &self.metrics
     }
 
-    /// Blast-radius projection, part of the designed observability surface;
-    /// consumed once a report path or a script surfaces it.
-    #[allow(dead_code)]
+    /// Blast-radius projection over the log.
     pub fn blast(&self) -> &BlastRadius {
         &self.blast
     }
@@ -199,15 +194,9 @@ mod tests {
             ExperimentEvent::StateEnumerated { unique: true },
             ExperimentEvent::StateEnumerated { unique: false },
             ExperimentEvent::FaultApplied {
-                step: 1,
-                subject: "docker/a".into(),
-                config: "cfg".into(),
                 fault: Fault::Kill,
             },
             ExperimentEvent::FaultApplied {
-                step: 2,
-                subject: "docker/a".into(),
-                config: "cfg".into(),
                 fault: Fault::Pause,
             },
             ExperimentEvent::Recovery {
@@ -227,6 +216,7 @@ mod tests {
         assert_eq!(m.recoveries, 1);
         assert_eq!(m.failures, 1);
         assert_eq!(m.total_recovery_time, Duration::from_millis(5));
+        assert_eq!(m.simulated_time, Duration::from_millis(5));
     }
 
     #[test]

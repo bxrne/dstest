@@ -8,8 +8,9 @@
 use mlua::Lua;
 
 use crate::application::context::BindingContext;
-use crate::application::log::Metrics;
+use crate::application::log::{BlastRadius, Metrics};
 use crate::application::usecases::teardown;
+use crate::domain::event::ExperimentEvent;
 use crate::domain::oracle::OracleReport;
 use crate::ports::Substrate;
 
@@ -35,8 +36,19 @@ impl<S: Substrate> Engine<S> {
         &self.ctx.lua
     }
 
+    /// Run a script, bracketing it with `ScenarioStarted`/`ScenarioCompleted`
+    /// events so the log records the scenario lifecycle.
     pub async fn execute(&self, script: &str) -> mlua::Result<()> {
-        self.ctx.lua.load(script).call_async::<()>(()).await
+        {
+            let mut s = self.ctx.state.lock().expect("poisoned engine state lock");
+            s.log.push(ExperimentEvent::ScenarioStarted);
+        }
+        let result = self.ctx.lua.load(script).call_async::<()>(()).await;
+        if result.is_ok() {
+            let mut s = self.ctx.state.lock().expect("poisoned engine state lock");
+            s.log.push(ExperimentEvent::ScenarioCompleted);
+        }
+        result
     }
 
     /// Tear down every live subject, awaiting each. Call this while a tokio
@@ -59,6 +71,17 @@ impl<S: Substrate> Engine<S> {
             .expect("poisoned engine state lock")
             .log
             .metrics()
+            .clone()
+    }
+
+    /// Blast-radius projection over the event log.
+    pub fn blast_radius(&self) -> BlastRadius {
+        self.ctx
+            .state
+            .lock()
+            .expect("poisoned engine state lock")
+            .log
+            .blast()
             .clone()
     }
 }

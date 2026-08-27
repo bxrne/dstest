@@ -49,7 +49,7 @@ pub fn register<S: Substrate>(lua: &Lua, dstest: &Table, ctx: &BindingContext<S>
                 let func_ref = lua.create_registry_value(func)?;
                 let func_ref = Arc::new(func_ref);
 
-                let predicate: PredicateFn = Box::new(
+                let predicate: PredicateFn = Arc::new(
                     move |lua: &Lua, subject: String, fault: String, round: usize| {
                         let func_ref = Arc::clone(&func_ref);
                         Box::pin(async move {
@@ -88,7 +88,7 @@ pub fn register<S: Substrate>(lua: &Lua, dstest: &Table, ctx: &BindingContext<S>
                 let func_ref = lua.create_registry_value(func)?;
                 let func_ref = Arc::new(func_ref);
 
-                let invariant: InvariantFn = Box::new(move |lua: &Lua| {
+                let invariant: InvariantFn = Arc::new(move |lua: &Lua| {
                     let func_ref = Arc::clone(&func_ref);
                     Box::pin(async move {
                         let func: Function = lua
@@ -144,8 +144,6 @@ pub fn register<S: Substrate>(lua: &Lua, dstest: &Table, ctx: &BindingContext<S>
                 OracleReport::from_events(&s.log.events()[start..])
             };
 
-            // `lua` is owned here; `report_to_table` wants a reference.
-            #[allow(clippy::needless_borrow)]
             report_to_table(&lua, &report)
         }
     })?;

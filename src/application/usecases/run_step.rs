@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use mlua::Lua;
 
-use crate::application::oracle::CheckRunner;
+use crate::application::oracle::{run_checks, CheckRunner};
 use crate::application::state::AppState;
 use crate::domain::config::AccumulationMode;
 use crate::domain::event::ExperimentEvent;
@@ -32,10 +32,9 @@ pub struct StepOutcome {
 
 /// Execute a single fault step. Returns `None` when the config's fault
 /// schedule is exhausted.
-#[allow(clippy::await_holding_lock)]
 pub async fn run_step<S: Substrate>(
     lua: &Lua,
-    state: &Arc<Mutex<AppState<S>>>,
+    state: &Arc<Mutex<AppState>>,
     oracle: &Arc<Mutex<CheckRunner>>,
     substrate: &Arc<S>,
     cfg_arg: Option<String>,
@@ -98,9 +97,7 @@ pub async fn run_step<S: Substrate>(
             {
                 let mut s = state.lock().expect("poisoned engine state lock");
                 s.subjects.clear_faults(&step_result.subject_id);
-                s.log.push(ExperimentEvent::FaultCleared {
-                    subject: step_result.subject_id.clone(),
-                });
+                s.log.push(ExperimentEvent::FaultCleared);
             }
             tokio::time::sleep(std::time::Duration::from_millis(cfg.step_delay_ms)).await;
         }
@@ -112,36 +109,86 @@ pub async fn run_step<S: Substrate>(
         .await
         .map_err(mlua::Error::RuntimeError)?;
 
+    let fault_str = step_result.fault.to_string();
     {
         let mut s = state.lock().expect("poisoned engine state lock");
-        s.subjects
-            .push_fault(&step_result.subject_id, step_result.fault);
+            s.subjects.push_fault(&step_result.subject_id, step_result.fault);
+        s.subjects.mark_faulted(&step_result.subject_id);
         s.log.push(ExperimentEvent::FaultApplied {
-            step: step_result.round,
-            subject: step_result.subject_id.clone(),
-            config: handle.clone(),
             fault: step_result.fault,
+        });
+
+        // State enumeration: each fault round visits a distinct engine state.
+        s.log.push(ExperimentEvent::StateEnumerated { unique: true });
+
+        // Interleaving enumeration: a config hosting several subjects offers
+        // multiple schedules, so each round on one is a distinct interleaving.
+        let subject_count = s.subjects.ids_for_config(&handle).len();
+        if subject_count > 1 {
+            s.log.push(ExperimentEvent::InterleavingEnumerated { unique: true });
+        }
+
+        // Blast radius: nodes of the config currently under fault.
+        let faulted = s
+            .subjects
+            .ids_for_config(&handle)
+            .iter()
+            .filter(|id| {
+                !s.subjects
+                    .find(id)
+                    .is_none_or(|r| r.active_faults.is_empty())
+            })
+            .count();
+        s.log.push(ExperimentEvent::BlastAffected {
+            class: "node",
+            affected: faulted as u64,
+            total: subject_count as u64,
         });
     }
 
-    // Run the oracle if it is enabled, emitting CheckRun events to the log.
+    // Run the oracle if it is enabled. Predicates/invariants are collected
+    // under a short lock and run against a scratch log, so no mutex guard is
+    // held across an `.await`; the resulting events are then replayed into the
+    // shared log under a brief, non-async lock.
     let oracle_report: Option<OracleReport> = {
-        let o = oracle.lock().expect("poisoned oracle lock");
-        if o.enabled() {
-            let mut s = state.lock().expect("poisoned engine state lock");
-            Some(
-                o.check_all(
-                    lua,
-                    &step_result.subject_id,
-                    &step_result.fault.to_string(),
-                    step_result.round,
-                    &mut s.log,
-                )
-                .await,
-            )
-        } else {
-            None
+        let checks = {
+            let o = oracle.lock().expect("poisoned oracle lock");
+            if o.enabled() {
+                Some(o.collect_checks())
+            } else {
+                None
+            }
+        };
+
+        let Some((preds, invs)) = checks else {
+            return Ok(Some(StepOutcome {
+                fault: step_result.fault,
+                subject: step_result.subject_id,
+                config: handle,
+                round: step_result.round,
+                total_rounds: step_result.total_rounds,
+                remaining: step_result.remaining,
+                more: step_result.more,
+                oracle: None,
+            }));
+        };
+
+        let mut scratch = crate::application::log::EventLog::new();
+        let report = run_checks(
+            lua,
+            &preds,
+            &invs,
+            &step_result.subject_id,
+            &fault_str,
+            step_result.round,
+            &mut scratch,
+        )
+        .await;
+        let mut s = state.lock().expect("poisoned engine state lock");
+        for ev in scratch.events() {
+            s.log.push(ev.clone());
         }
+        Some(report)
     };
 
     Ok(Some(StepOutcome {

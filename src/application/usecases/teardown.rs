@@ -14,7 +14,7 @@ use crate::ports::Substrate;
 
 /// Drain and tear down every subject, awaiting each. Idempotent: subsequent
 /// calls tear down nothing.
-pub async fn teardown_all<S: Substrate>(state: &Arc<Mutex<AppState<S>>>, substrate: &Arc<S>) {
+pub async fn teardown_all<S: Substrate>(state: &Arc<Mutex<AppState>>, substrate: &Arc<S>) {
     let records: Vec<(String, String)> = {
         let mut s = state.lock().expect("poisoned engine state lock");
         s.subjects.drain()
@@ -26,7 +26,7 @@ pub async fn teardown_all<S: Substrate>(state: &Arc<Mutex<AppState<S>>>, substra
         } else {
             debug!("teardown complete for subject {} ({})", name, id);
             let mut s = state.lock().expect("poisoned engine state lock");
-            s.log.push(ExperimentEvent::SubjectTornDown { id });
+            s.log.push(ExperimentEvent::SubjectTornDown);
         }
     }
 }

@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use mlua::Table;
 
-use crate::application::state::{AppState, SubjectRecord};
+use crate::application::state::AppState;
 use crate::domain::event::ExperimentEvent;
 use crate::domain::subject::{Subject, SubjectStatus};
 use crate::ports::Substrate;
@@ -19,7 +19,7 @@ const DEP_WAIT_INTERVAL: Duration = Duration::from_millis(500);
 
 /// Host a subject for a config handle. Returns the subject id.
 pub async fn setup<S: Substrate>(
-    state: &Arc<Mutex<AppState<S>>>,
+    state: &Arc<Mutex<AppState>>,
     substrate: &Arc<S>,
     handle: String,
     config_tbl: Table,
@@ -96,20 +96,16 @@ pub async fn setup<S: Substrate>(
         let mut s = state.lock().expect("poisoned engine state lock");
         let host = hosted.addr.clone();
         s.subjects.add(
-            SubjectRecord {
+            crate::application::state::SubjectRecord {
                 id: subject_id.clone(),
                 name,
-                config: handle.clone(),
+                config: handle,
                 active_faults: Vec::new(),
-                data,
+                faulted_at: None,
             },
             host,
         );
-        s.log.push(ExperimentEvent::SubjectHosted {
-            id: subject_id.clone(),
-            config: handle,
-            name: subject_id.clone(),
-        });
+        s.log.push(ExperimentEvent::SubjectHosted);
     }
 
     Ok(subject_id)
