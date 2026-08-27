@@ -20,7 +20,7 @@ pub fn register<S: Substrate>(_lua: &Lua, dstest: &Table, ctx: &BindingContext<S
             let subject = Subject::new(subject_id.clone());
             let had_faults = {
                 let s = state.lock().expect("poisoned engine state lock");
-                s.subjects.find(&subject_id).map_or(false, |r| !r.active_faults.is_empty())
+                s.subjects.find(&subject_id).is_some_and(|r| !r.active_faults.is_empty())
             };
 
             // Nothing to recover: this is a no-op clear, so emit no events.
