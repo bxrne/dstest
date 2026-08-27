@@ -24,9 +24,10 @@ local info = dstest.inspect(s)
 local host_addr = info.host or info.ip
 dstest.info("connecting via host addr: " .. tostring(host_addr) .. " (ip: " .. tostring(info.ip) .. ")")
 
--- Give Postgres time to finish its boot cycle
+-- Give Postgres time to finish its boot cycle. Podman/docker machine VMs can
+-- take several seconds to pull and start the image, so wait conservatively.
 dstest.info("waiting for database boot...")
-dstest.exec(s, { "sleep", "3" })
+dstest.exec(s, { "sleep", "8" })
 
 local conn_str = string.format("postgres://postgres:password@%s/test_db", host_addr)
 dstest.info("connecting: " .. conn_str)
@@ -53,4 +54,7 @@ end
 assert(#rows == 3, "expected 3 users, got " .. #rows)
 
 dstest.pg.close(pool)
+
+-- Tear the container down so the example leaves nothing behind.
+dstest.dst.clear(s)
 dstest.info("pg example complete")
