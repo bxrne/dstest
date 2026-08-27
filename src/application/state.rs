@@ -107,11 +107,16 @@ impl SubjectRegistry {
         self.find(id).and_then(|r| r.faulted_at)
     }
 
-    pub fn clear_faults(&mut self, id: &str) {
-        if let Some(rec) = self.find_mut(id) {
-            rec.active_faults.clear();
-            rec.faulted_at = None;
-        }
+    /// Clear a subject's faults. Returns `true` if the subject had at least
+    /// one active fault (and a pending recovery) that was cleared.
+    pub fn clear_faults(&mut self, id: &str) -> bool {
+        let Some(rec) = self.find_mut(id) else {
+            return false;
+        };
+        let had_faults = !rec.active_faults.is_empty();
+        rec.active_faults.clear();
+        rec.faulted_at = None;
+        had_faults
     }
 
     /// Drain the registry for teardown, returning the id/name pairs.
