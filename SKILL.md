@@ -89,7 +89,7 @@ link:heal()
 
 Call `dstest.config()` first: it returns a **handle**: then pass that handle
 as the first argument to `dstest.setup()`. Full field reference:
-[`src/bindings/core/README.md`](src/bindings/core/README.md).
+[`src/adapters/lua/core/README.md`](src/adapters/lua/core/README.md).
 
 ```lua
 local docker_config = dstest.config({
@@ -147,7 +147,7 @@ local exec_result = dstest.exec(s, {"ls", "-la", "/app"})
 ```
 
 For the full API reference, see the per-module READMEs linked from
-[`src/bindings/README.md`](src/bindings/README.md).
+[`src/adapters/lua/README.md`](src/adapters/lua/README.md).
 
 ## Oracle (Automated Verification)
 
@@ -165,7 +165,7 @@ end)
 print(report.passed, report.passed_checks, report.failed_checks)
 ```
 
-Full oracle reference: [`src/bindings/dst/README.md`](src/bindings/dst/README.md).
+Full oracle reference: [`src/adapters/lua/dst/README.md`](src/adapters/lua/dst/README.md).
 
 ## Common Patterns
 

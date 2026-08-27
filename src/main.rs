@@ -1,24 +1,35 @@
+//! dstest — distributed systems fault testing harness. Composition root.
+//!
+//! This module is the only place that knows every layer: it selects the
+//! Docker substrate adapter, builds the application engine, registers the
+//! Lua bindings against it, and drives the script from stdin.
+
+mod adapters;
+mod application;
+mod domain;
+mod ports;
+
 use std::io::{Read, stdin};
 use tracing::{debug, error};
-mod bindings;
-mod components;
-mod config;
-mod engine;
-mod fault;
-mod oracle;
-mod substrate;
 
 fn main() {
     tracing_subscriber::fmt::init();
 
     debug!("Starting dstest");
 
-    let docker = substrate::docker::Docker::new().unwrap_or_else(|e| {
+    let docker = adapters::substrate::docker::Docker::new().unwrap_or_else(|e| {
         error!("Failed to connect to Docker daemon: {e}");
         std::process::exit(3);
     });
 
-    let engine = engine::Engine::new(docker);
+    let engine = application::Engine::new(docker);
+
+    // Wire the Lua bindings onto the engine (composition root; the engine
+    // itself knows nothing about concrete adapters).
+    if let Err(e) = adapters::lua::register_all(engine.lua(), engine.context()) {
+        error!("Failed to register Lua bindings error=\"{e}\"");
+        std::process::exit(1);
+    }
 
     debug!("Reading scripts from stdin");
     let mut script = String::new();
@@ -36,6 +47,18 @@ fn main() {
         match result {
             Ok(()) => {
                 let report = engine.oracle_report();
+                let metrics = engine.metrics();
+                debug!(
+                    "Experiment complete: {} scenarios, {} faults, {} unique states, {} recoveries ({} failures), report={}/{}/{}",
+                    metrics.scenarios,
+                    metrics.faults_injected,
+                    metrics.unique_states,
+                    metrics.recoveries,
+                    metrics.failures,
+                    report.passed_checks,
+                    report.failed_checks,
+                    report.total_checks,
+                );
                 if report.total_checks > 0 && !report.passed {
                     error!(
                         "oracle failures detected: {} of {} checks failed",

@@ -23,17 +23,17 @@ others are namespaced under sub-tables.
 
 | Namespace | Functions | Reference |
 |-----------|-----------|-----------|
-| `dstest.config`, `dstest.setup` | experiment config, create subjects | [`src/bindings/core/README.md`](src/bindings/core/README.md) |
-| `dstest.dst.step`, `dstest.dst.run_steps`, `dstest.dst.clear` | fault injection | [`src/bindings/dst/README.md`](src/bindings/dst/README.md) |
-| `dstest.dst.oracle.*` | predicates, invariants, reports | [`src/bindings/dst/README.md`](src/bindings/dst/README.md) |
-| `dstest.net.http`, `dstest.net.tcp`, `dstest.net.link` | HTTP, TCP, subject links | [`src/bindings/net/README.md`](src/bindings/net/README.md) |
-| `dstest.inspect`, `dstest.logs`, `dstest.exec` | container introspection | [`src/bindings/subs/README.md`](src/bindings/subs/README.md) |
-| `dstest.pg.connect`, `dstest.pg.query`, `dstest.pg.close` | PostgreSQL | [`src/bindings/pg/README.md`](src/bindings/pg/README.md) |
-| `dstest.clock`, `dstest.clock.now`, `dstest.clock.virtual` | timestamps, virtual clocks | [`src/bindings/clock/README.md`](src/bindings/clock/README.md) |
-| `dstest.storage.*` | virtual disk faults | [`src/bindings/storage/README.md`](src/bindings/storage/README.md) |
-| `dstest.random.*` | seeded reproducible randomness | [`src/bindings/random/README.md`](src/bindings/random/README.md) |
-| `dstest.workload.http`, `dstest.workload.pg` | sustained HTTP/PG traffic with stats | [`src/bindings/workload/README.md`](src/bindings/workload/README.md) |
-| `dstest.debug`, `dstest.info`, `dstest.warn`, `dstest.error` | logging | [`src/bindings/log/README.md`](src/bindings/log/README.md) |
+| `dstest.config`, `dstest.setup` | experiment config, create subjects | [`src/adapters/lua/core/README.md`](src/adapters/lua/core/README.md) |
+| `dstest.dst.step`, `dstest.dst.run_steps`, `dstest.dst.clear` | fault injection | [`src/adapters/lua/dst/README.md`](src/adapters/lua/dst/README.md) |
+| `dstest.dst.oracle.*` | predicates, invariants, reports | [`src/adapters/lua/dst/README.md`](src/adapters/lua/dst/README.md) |
+| `dstest.net.http`, `dstest.net.tcp`, `dstest.net.link` | HTTP, TCP, subject links | [`src/adapters/lua/net/README.md`](src/adapters/lua/net/README.md) |
+| `dstest.inspect`, `dstest.logs`, `dstest.exec` | container introspection | [`src/adapters/lua/subs/README.md`](src/adapters/lua/subs/README.md) |
+| `dstest.pg.connect`, `dstest.pg.query`, `dstest.pg.close` | PostgreSQL | [`src/adapters/lua/pg/README.md`](src/adapters/lua/pg/README.md) |
+| `dstest.clock`, `dstest.clock.now`, `dstest.clock.virtual` | timestamps, virtual clocks | [`src/adapters/lua/clock/README.md`](src/adapters/lua/clock/README.md) |
+| `dstest.storage.*` | virtual disk faults | [`src/adapters/lua/storage/README.md`](src/adapters/lua/storage/README.md) |
+| `dstest.random.*` | seeded reproducible randomness | [`src/adapters/lua/random/README.md`](src/adapters/lua/random/README.md) |
+| `dstest.workload.http`, `dstest.workload.pg` | sustained HTTP/PG traffic with stats | [`src/adapters/lua/workload/README.md`](src/adapters/lua/workload/README.md) |
+| `dstest.debug`, `dstest.info`, `dstest.warn`, `dstest.error` | logging | [`src/adapters/lua/log/README.md`](src/adapters/lua/log/README.md) |
 
 ## Configs and subjects
 
