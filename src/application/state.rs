@@ -121,7 +121,9 @@ impl SubjectRegistry {
 
     /// Drain the registry for teardown, returning the id/name pairs.
     pub fn drain(&mut self) -> Vec<(String, String)> {
-        self.subjects.drain(..).map(|r| (r.id, r.name)).collect()
+        let records = self.subjects.drain(..).map(|r| (r.id, r.name)).collect();
+        self.hosts.clear();
+        records
     }
 }
 
