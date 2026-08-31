@@ -370,6 +370,32 @@ impl Substrate for Docker {
                     .await
                     .map_err(|e| format!("Failed to start container: {}", e))?;
 
+                // Block until the container reaches the running state so that
+                // callers (dstest.exec, dstest.net.tcp, dstest.net.link) never
+                // race its startup. `depends` already waits for upstream
+                // subjects; this closes the gap for the current subject itself.
+                const READY_ATTEMPTS: u32 = 120;
+                const READY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+                let mut ready = false;
+                for _ in 0..READY_ATTEMPTS {
+                    let info = conn
+                        .inspect_container(&container_id, None::<InspectContainerOptions>)
+                        .await
+                        .map_err(|e| format!("Ready inspect failed: {}", e))?;
+                    if info.state.and_then(|s| s.status) == Some(ContainerStateStatusEnum::RUNNING)
+                    {
+                        ready = true;
+                        break;
+                    }
+                    tokio::time::sleep(READY_INTERVAL).await;
+                }
+                if !ready {
+                    return Err(format!(
+                        "container {} did not reach the running state in time",
+                        container_id
+                    ));
+                }
+
                 let info = conn
                     .inspect_container(&container_id, None::<InspectContainerOptions>)
                     .await
