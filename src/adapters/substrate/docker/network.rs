@@ -336,6 +336,7 @@ impl NetworkControl for DockerNetwork {
             // podman/docker machine VM where the host can't dial container IPs)
             // cannot hang the whole experiment.
             let ready_addr = format!("{}:{}", proxy_ip, port);
+            let mut ready = false;
             for attempt in 0..10 {
                 let connected = tokio::time::timeout(
                     Duration::from_millis(500),
@@ -345,9 +346,16 @@ impl NetworkControl for DockerNetwork {
                 .is_ok_and(|r| r.is_ok());
                 if connected {
                     debug!("proxy ready after {} attempts", attempt + 1);
+                    ready = true;
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+            if !ready {
+                return Err(format!(
+                    "proxy container {} never became reachable at {} (socat setup failed)",
+                    container_name, ready_addr
+                ));
             }
 
             self.links.lock().expect("poisoned links lock").insert(
