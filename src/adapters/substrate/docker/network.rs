@@ -536,8 +536,12 @@ impl NetworkControl for DockerNetwork {
             };
 
             // Remove iptables OUTPUT DROP (blackhole) — errors if absent.
-            self.heal_rule(&container_name, &["iptables", "-D", "OUTPUT", "-j", "DROP"], link)
-                .await;
+            self.heal_rule(
+                &container_name,
+                &["iptables", "-D", "OUTPUT", "-j", "DROP"],
+                link,
+            )
+            .await;
 
             // Remove iptables OUTPUT tcp-reset (reset partition) — errors if absent.
             self.heal_rule(

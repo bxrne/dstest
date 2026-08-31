@@ -80,7 +80,9 @@ impl Config {
     /// [`Config::normalize_weights`].
     pub fn validate(&self) -> Result<(), String> {
         if self.steps == 0 {
-            return Err("steps must be > 0: a fault schedule of zero steps is meaningless".to_string());
+            return Err(
+                "steps must be > 0: a fault schedule of zero steps is meaningless".to_string(),
+            );
         }
 
         let mut valid_weights = 0usize;

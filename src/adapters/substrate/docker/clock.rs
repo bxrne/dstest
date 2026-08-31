@@ -320,9 +320,7 @@ impl DockerClock {
             info!("virtual clock: shim ready at {}", dir.display());
             Ok::<(), String>(())
         };
-        let build_result = match tokio::time::timeout(BUILD_TIMEOUT, build)
-            .await
-        {
+        let build_result = match tokio::time::timeout(BUILD_TIMEOUT, build).await {
             Ok(res) => res,
             Err(_) => Err(format!(
                 "clock shim build timed out after {}s (check network / registry access)",

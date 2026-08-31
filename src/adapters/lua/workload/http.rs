@@ -107,64 +107,62 @@ pub fn register(lua: &Lua, workload: &Table, ctx: &BindingContext) -> Result<()>
             let rate: u64 = opts.get("rate").unwrap_or(10);
 
             // Build request list from either OpenAPI spec or manual requests table
-            let reqs: Arc<Vec<HttpReq>> =
-                if let Ok(openapi_path) = opts.get::<String>("openapi") {
-                    if let Some(cached) = OPENAPI_CACHE
+            let reqs: Arc<Vec<HttpReq>> = if let Ok(openapi_path) = opts.get::<String>("openapi") {
+                if let Some(cached) = OPENAPI_CACHE
+                    .lock()
+                    .expect("poisoned openapi cache")
+                    .get(&openapi_path)
+                {
+                    Arc::clone(cached)
+                } else {
+                    let spec = std::fs::read_to_string(&openapi_path).map_err(|e| {
+                        mlua::Error::RuntimeError(format!(
+                            "cannot read OpenAPI spec '{}': {}",
+                            openapi_path, e
+                        ))
+                    })?;
+                    let parsed = Arc::new(parse_openapi(&spec)?);
+                    OPENAPI_CACHE
                         .lock()
                         .expect("poisoned openapi cache")
-                        .get(&openapi_path)
-                    {
-                        Arc::clone(cached)
-                    } else {
-                        let spec = std::fs::read_to_string(&openapi_path).map_err(|e| {
-                            mlua::Error::RuntimeError(format!(
-                                "cannot read OpenAPI spec '{}': {}",
-                                openapi_path, e
-                            ))
-                        })?;
-                        let parsed = Arc::new(parse_openapi(&spec)?);
-                        OPENAPI_CACHE
-                            .lock()
-                            .expect("poisoned openapi cache")
-                            .insert(openapi_path, Arc::clone(&parsed));
-                        parsed
-                    }
-                } else if let Ok(reqs_tbl) = opts.get::<Table>("requests") {
-                    let mut reqs = Vec::new();
-                    let len = reqs_tbl.raw_len();
-                    for i in 1..=len {
-                        let entry: Table = reqs_tbl.raw_get(i as i64).map_err(|_| {
-                            mlua::Error::RuntimeError(format!("requests[{}] is not a table", i))
-                        })?;
-                        let method: String =
-                            entry.get("method").unwrap_or_else(|_| "GET".to_string());
-                        let path: String = entry.get("path").map_err(|_| {
-                            mlua::Error::RuntimeError("each request needs a 'path' field".to_string())
-                        })?;
-                        let body: Option<String> = entry.get("body").ok();
-                        let content_type: Option<String> = entry.get("content_type").ok();
-                        reqs.push(HttpReq {
-                            method,
-                            path,
-                            body,
-                            content_type,
-                        });
-                    }
-                    if reqs.is_empty() {
-                        return Err(mlua::Error::RuntimeError(
-                            "requests list is empty".to_string(),
-                        ));
-                    }
-                    Arc::new(reqs)
-                } else {
-                    // Default: GET /get
-                    Arc::new(vec![HttpReq {
-                        method: "GET".to_string(),
-                        path: "/get".to_string(),
-                        body: None,
-                        content_type: None,
-                    }])
-                };
+                        .insert(openapi_path, Arc::clone(&parsed));
+                    parsed
+                }
+            } else if let Ok(reqs_tbl) = opts.get::<Table>("requests") {
+                let mut reqs = Vec::new();
+                let len = reqs_tbl.raw_len();
+                for i in 1..=len {
+                    let entry: Table = reqs_tbl.raw_get(i as i64).map_err(|_| {
+                        mlua::Error::RuntimeError(format!("requests[{}] is not a table", i))
+                    })?;
+                    let method: String = entry.get("method").unwrap_or_else(|_| "GET".to_string());
+                    let path: String = entry.get("path").map_err(|_| {
+                        mlua::Error::RuntimeError("each request needs a 'path' field".to_string())
+                    })?;
+                    let body: Option<String> = entry.get("body").ok();
+                    let content_type: Option<String> = entry.get("content_type").ok();
+                    reqs.push(HttpReq {
+                        method,
+                        path,
+                        body,
+                        content_type,
+                    });
+                }
+                if reqs.is_empty() {
+                    return Err(mlua::Error::RuntimeError(
+                        "requests list is empty".to_string(),
+                    ));
+                }
+                Arc::new(reqs)
+            } else {
+                // Default: GET /get
+                Arc::new(vec![HttpReq {
+                    method: "GET".to_string(),
+                    path: "/get".to_string(),
+                    body: None,
+                    content_type: None,
+                }])
+            };
 
             let (host, timeout, retries, delay) = {
                 let state = state.lock().expect("poisoned engine state lock");
