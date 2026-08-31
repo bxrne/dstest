@@ -201,6 +201,26 @@ impl DockerNetwork {
         Ok(())
     }
 
+    /// Best-effort removal of one healing rule. A rule that is already absent
+    /// makes the command exit non-zero; that is the normal state on a fresh
+    /// link and is logged at debug. A transport failure (the proxy container
+    /// is gone) leaves impairments active, so it is logged at warn. The
+    /// caller cannot distinguish the two from the returned error alone, so
+    /// the classification relies on the error prefix produced by
+    /// [`Self::exec_in_proxy`].
+    async fn heal_rule(&self, container_name: &str, cmd: &[&str], link: &LinkId) {
+        match self.exec_in_proxy(container_name, cmd).await {
+            Ok(()) => debug!("link {} healed: {:?}", link.0, cmd),
+            Err(e) if e.starts_with("exec in ") => {
+                debug!("link {} rule {:?} already absent", link.0, cmd)
+            }
+            Err(e) => warn!(
+                "link {} could not heal {:?}; proxy may be unreachable, impairments may remain: {}",
+                link.0, cmd, e
+            ),
+        }
+    }
+
     /// Apply the current netem settings stored on a link.
     async fn apply_netem(&self, link: &LinkId) -> Result<(), String> {
         let (container_name, delay_ms, jitter_ms, loss_pct) = {
@@ -516,12 +536,11 @@ impl NetworkControl for DockerNetwork {
             };
 
             // Remove iptables OUTPUT DROP (blackhole) — errors if absent.
-            self.exec_in_proxy(&container_name, &["iptables", "-D", "OUTPUT", "-j", "DROP"])
-                .await
-                .ok();
+            self.heal_rule(&container_name, &["iptables", "-D", "OUTPUT", "-j", "DROP"], link)
+                .await;
 
             // Remove iptables OUTPUT tcp-reset (reset partition) — errors if absent.
-            self.exec_in_proxy(
+            self.heal_rule(
                 &container_name,
                 &[
                     "iptables",
@@ -534,17 +553,17 @@ impl NetworkControl for DockerNetwork {
                     "--reject-with",
                     "tcp-reset",
                 ],
+                link,
             )
-            .await
-            .ok();
+            .await;
 
             // Remove tc qdisc (latency/loss) — errors if absent.
-            self.exec_in_proxy(
+            self.heal_rule(
                 &container_name,
                 &["tc", "qdisc", "del", "dev", "eth0", "root"],
+                link,
             )
-            .await
-            .ok();
+            .await;
 
             {
                 let mut links = self.links.lock().expect("poisoned links lock");
