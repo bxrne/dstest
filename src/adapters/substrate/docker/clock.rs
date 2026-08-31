@@ -8,10 +8,13 @@
 //! harness-controlled manual clock: the subject's time is frozen until dstest
 //! advances it by writing a new value.
 //!
-//! The shim is compiled once on CentOS 7 (glibc 2.17) so the resulting `.so`
-//! loads into any glibc-based subject (forward-compatible). Monotonic clocks
-//! are NOT faked — subject timeouts and busy-waits use real elapsed time,
-//! which is the correct DST semantics (the virtual clock only moves when
+//! The shim source lives at `shim/clock.c` and is cross-compiled to a Linux
+//! x86-64 ELF by [`build.rs`](build.rs) using the Zig compiler (bundled glibc
+//! headers), so no container or target toolchain is required at build time and
+//! CI verifies the C compiles on every build. The produced `.so` is embedded
+//! into the binary and written to the assets dir on first use. Monotonic
+//! clocks are NOT faked — subject timeouts and busy-waits use real elapsed
+//! time, which is the correct DST semantics (the virtual clock only moves when
 //! dstest says so).
 //!
 //! Limitations:
@@ -26,91 +29,18 @@ use std::future::Future;
 use std::io::Read;
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use bollard::Docker as BollardDocker;
-use bollard::models::{ContainerCreateBody, HostConfig};
-use bollard::query_parameters::{
-    CreateContainerOptions, RemoveContainerOptions, StartContainerOptions, WaitContainerOptions,
-};
-use futures_util::TryStreamExt;
-use tracing::{debug, info, warn};
+use tracing::debug;
 
 use crate::domain::subject::Subject;
 use crate::ports::components::{ClockControl, ClockState};
 
-/// The clock shim C source. Intercepts CLOCK_REALTIME only; reads nanoseconds
-/// from a binary control file on each call.
-const CLOCK_SHIM_C: &str = r#"
-#define _GNU_SOURCE
-#include <time.h>
-#include <sys/time.h>
-#include <dlfcn.h>
-#include <fcntl.h>
-#include <unistd.h>
-#include <stdlib.h>
-
-static int (*real_clock_gettime)(clockid_t, struct timespec *);
-static time_t (*real_time)(time_t *);
-static int (*real_gettimeofday)(struct timeval *, void *);
-static const char *ctl_path;
-
-__attribute__((constructor))
-static void dstest_clock_init(void) {
-    real_clock_gettime = dlsym(RTLD_NEXT, "clock_gettime");
-    real_time = dlsym(RTLD_NEXT, "time");
-    real_gettimeofday = dlsym(RTLD_NEXT, "gettimeofday");
-    ctl_path = getenv("DSTEST_CLOCK_CTL");
-}
-
-static int read_clock(struct timespec *tp) {
-    if (!ctl_path) return -1;
-    int fd = open(ctl_path, O_RDONLY);
-    if (fd < 0) return -1;
-    long long nanos = -1;
-    if (read(fd, &nanos, 8) != 8) { close(fd); return -1; }
-    close(fd);
-    if (nanos < 0) return -1;
-    tp->tv_sec = (time_t)(nanos / 1000000000LL);
-    tp->tv_nsec = (long)(nanos % 1000000000LL);
-    return 0;
-}
-
-int clock_gettime(clockid_t clk, struct timespec *tp) {
-    if (!real_clock_gettime) dstest_clock_init();
-    if (clk == CLOCK_REALTIME
-#ifdef CLOCK_REALTIME_COARSE
-        || clk == CLOCK_REALTIME_COARSE
-#endif
-    ) {
-        if (read_clock(tp) == 0) return 0;
-    }
-    return real_clock_gettime(clk, tp);
-}
-
-time_t time(time_t *t) {
-    if (!real_time) dstest_clock_init();
-    struct timespec tp;
-    if (clock_gettime(CLOCK_REALTIME, &tp) == 0) {
-        if (t) *t = tp.tv_sec;
-        return tp.tv_sec;
-    }
-    return real_time(t);
-}
-
-int gettimeofday(struct timeval *tv, void *tz) {
-    if (!real_gettimeofday) dstest_clock_init();
-    struct timespec tp;
-    if (tv && clock_gettime(CLOCK_REALTIME, &tp) == 0) {
-        tv->tv_sec = (time_t)tp.tv_sec;
-        tv->tv_usec = (suseconds_t)(tp.tv_nsec / 1000);
-        /* tz is obsolete and ignored; leaving it untouched matches the kernel. */
-        return 0;
-    }
-    return real_gettimeofday(tv, tz);
-}
-"#;
+/// The compiled clock shim, cross-compiled to a Linux x86-64 ELF by
+/// `build.rs` and embedded into the binary. Written to the assets dir on first
+/// use; a subject's container preloads it via `LD_PRELOAD`.
+const CLOCK_SHIM_SO: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/dstest_clock.so"));
 
 /// Parsed from the `clock` table of `dstest.setup`.
 #[derive(Clone, Debug)]
@@ -129,7 +59,6 @@ pub struct ClockPrep {
 }
 
 pub struct DockerClock {
-    connection: OnceLock<Result<BollardDocker, String>>,
     /// container id -> control file path on the host
     clocks: Mutex<HashMap<String, PathBuf>>,
 }
@@ -137,18 +66,8 @@ pub struct DockerClock {
 impl DockerClock {
     pub fn new() -> Self {
         Self {
-            connection: OnceLock::new(),
             clocks: Mutex::new(HashMap::new()),
         }
-    }
-
-    /// Lazily connect to the Docker daemon on first use.
-    fn connection(&self) -> Result<&BollardDocker, String> {
-        let init = self.connection.get_or_init(|| {
-            BollardDocker::connect_with_local_defaults()
-                .map_err(|e| format!("Failed to connect to Docker: {}", e))
-        });
-        init.as_ref().map_err(|e| e.clone())
     }
 
     /// Host directory holding the compiled shim and per-subject control files.
@@ -164,7 +83,7 @@ impl DockerClock {
     /// clock. Called before container creation; the returned `ctl_path` is
     /// registered once the container id is known.
     pub async fn prepare(&self, subject_name: &str, spec: &ClockSpec) -> Result<ClockPrep, String> {
-        let dir = self.ensure_assets().await?;
+        let dir = self.ensure_assets()?;
 
         let start_nanos = spec
             .start_epoch_secs
@@ -244,101 +163,20 @@ impl DockerClock {
         Ok(())
     }
 
-    /// Ensure the clock shim `.so` exists in the assets dir, compiling it
-    /// via a throwaway CentOS 7 container on first use. The C source is
-    /// written to the assets dir on the host; the container mounts it,
-    /// compiles, and writes the `.so` back via the bind mount.
-    async fn ensure_assets(&self) -> Result<PathBuf, String> {
+    /// Ensure the embedded clock shim `.so` exists in the assets dir, writing
+    /// it out from the bytes compiled by `build.rs` on first use. No container
+    /// or runtime toolchain is involved; the shim ships inside the binary.
+    fn ensure_assets(&self) -> Result<PathBuf, String> {
         let dir = Self::assets_dir();
         let so_path = dir.join("dstest_clock.so");
         if so_path.exists() {
             return Ok(dir);
         }
 
-        fs::create_dir_all(&dir)
-            .map_err(|e| format!("failed to create clock assets dir: {}", e))?;
-
-        // Write the C source for the container to compile.
-        let c_path = dir.join("clock.c");
-        fs::write(&c_path, CLOCK_SHIM_C).map_err(|e| format!("failed to write clock.c: {}", e))?;
-
-        info!("virtual clock: compiling clock shim (one-time setup)");
-        let conn = self.connection()?;
-
-        // CentOS 7 (glibc 2.17): the .so loads into any newer-glibc subject.
-        super::Docker::pull_image(conn, "centos:7").await?;
-
-        let config = ContainerCreateBody {
-            image: Some("centos:7".to_string()),
-            cmd: Some(vec![
-                "sh".to_string(),
-                "-c".to_string(),
-                "sed -i 's|mirrorlist=|#mirrorlist=|g; s|#baseurl=http://mirror.centos.org|baseurl=http://vault.centos.org|g' /etc/yum.repos.d/CentOS-*.repo \
-                 && yum install -y -q gcc \
-                 && cc -shared -fPIC -o /dstest-assets/dstest_clock.so /dstest-assets/clock.c -ldl"
-                    .to_string(),
-            ]),
-            host_config: Some(HostConfig {
-                binds: Some(vec![format!("{}:/dstest-assets", dir.display())]),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-
-        let container = conn
-            .create_container(None::<CreateContainerOptions>, config)
-            .await
-            .map_err(|e| format!("failed to create clock build container: {}", e))?;
-        let build_id = container.id.clone();
-
-        // Bound the whole build (yum install needs network access and can be
-        // slow on a cold cache; without a bound a hung registry or mirror
-        // stalls every subject that opts into a virtual clock).
-        const BUILD_TIMEOUT: Duration = Duration::from_secs(600);
-        let build = async {
-            conn.start_container(&build_id, None::<StartContainerOptions>)
-                .await
-                .map_err(|e| format!("failed to start clock build container: {}", e))?;
-
-            let waits = conn
-                .wait_container(&build_id, None::<WaitContainerOptions>)
-                .try_collect::<Vec<_>>()
-                .await
-                .map_err(|e| format!("clock build container wait failed: {}", e))?;
-            let exit = waits.first().map(|w| w.status_code).unwrap_or(-1);
-            if exit != 0 {
-                return Err(format!(
-                    "clock build container exited with {} (network access required for yum)",
-                    exit
-                ));
-            }
-
-            if !so_path.exists() {
-                return Err("clock shim was not produced (cc failed silently)".to_string());
-            }
-
-            info!("virtual clock: shim ready at {}", dir.display());
-            Ok::<(), String>(())
-        };
-        let build_result = match tokio::time::timeout(BUILD_TIMEOUT, build).await {
-            Ok(res) => res,
-            Err(_) => Err(format!(
-                "clock shim build timed out after {}s (check network / registry access)",
-                BUILD_TIMEOUT.as_secs()
-            )),
-        };
-
-        // Always clean up the build container.
-        let options = RemoveContainerOptions {
-            v: true,
-            force: true,
-            link: false,
-        };
-        if let Err(e) = conn.remove_container(&build_id, Some(options)).await {
-            warn!("failed to remove clock build container: {}", e);
-        }
-
-        build_result?;
+        fs::create_dir_all(&dir).map_err(|e| format!("failed to create clock assets dir: {}", e))?;
+        let tmp = dir.join("dstest_clock.so.tmp");
+        fs::write(&tmp, CLOCK_SHIM_SO).map_err(|e| format!("failed to write clock shim: {}", e))?;
+        fs::rename(&tmp, &so_path).map_err(|e| format!("failed to finalize clock shim: {}", e))?;
         Ok(dir)
     }
 }
