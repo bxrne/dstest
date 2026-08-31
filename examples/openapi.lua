@@ -15,6 +15,18 @@ local cfg = dstest.config({
     http_retry_delay = 300,
 })
 
+-- Docker bind-mount sources must be absolute host paths, so resolve the
+-- spec file's absolute path once. The harness runs from the repo root, but
+-- never assume that for the container mount.
+local function abspath(p)
+    if p:sub(1, 1) == "/" then return p end
+    local popen = assert(io.popen("pwd -P"), "pwd unavailable")
+    local cwd = assert(popen:read("*l"))
+    popen:close()
+    return cwd .. "/" .. p
+end
+local SPEC = abspath("examples/openapi.json")
+
 local server = dstest.setup(cfg, {
     image = "kennethreitz/httpbin",
     ports = { 80 },
@@ -26,7 +38,7 @@ local server = dstest.setup(cfg, {
 local client = dstest.setup(cfg, {
     image = "curlimages/curl:latest",
     cmd = { "sleep", "300" },
-    volumes = { "examples/openapi.json:/specs/openapi.json:ro" },
+    volumes = { SPEC .. ":/specs/openapi.json:ro" },
     depends = { server },
 })
 
@@ -119,17 +131,17 @@ end
 -- Read the spec from the host, exactly as dstest.workload.http will, and log
 -- the discovered surface.
 local listed = {}
-for method, path in openapi_pairs("examples/openapi.json") do
+for method, path in openapi_pairs(SPEC) do
     listed[#listed + 1] = method .. " " .. path
 end
 dstest.info("spec endpoints: " .. table.concat(listed, ", "))
 
 -- Drive sustained traffic from the endpoints declared by the spec. The
--- generator reads examples/openapi.json from the host filesystem.
+-- generator reads the spec from the host filesystem.
 local report = dstest.workload.http(server, {
     duration_secs = 8,
     rate = 12,
-    openapi = "examples/openapi.json",
+    openapi = SPEC,
 })
 
 dstest.info(string.format(

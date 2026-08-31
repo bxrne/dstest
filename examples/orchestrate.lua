@@ -71,8 +71,9 @@ end
 
 -- Every fault is cleared; the service must be healthy again at the end.
 local ok, resp = pcall(dstest.net.http, s, "GET", "/get")
+local status = ok and resp and resp.status or nil
 dstest.info(string.format(
-    "post-run health: ok=%s status=%s", tostring(ok), tostring(resp and resp.status)
+    "post-run health: ok=%s status=%s", tostring(ok), tostring(status)
 ))
 
 -- The engine derives the oracle report from its event log.
