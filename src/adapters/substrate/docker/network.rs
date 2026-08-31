@@ -301,62 +301,89 @@ impl NetworkControl for DockerNetwork {
                 )
                 .await
                 .map_err(|e| format!("failed to create proxy container: {}", e))?;
+            let container_id = container.id.clone();
 
-            self.connection()?
-                .start_container(&container.id, None::<StartContainerOptions>)
-                .await
-                .map_err(|e| format!("failed to start proxy container: {}", e))?;
+            let setup = async {
+                self.connection()?
+                    .start_container(&container_id, None::<StartContainerOptions>)
+                    .await
+                    .map_err(|e| format!("failed to start proxy container: {}", e))?;
 
-            // Get the proxy container's bridge IP.
-            let info = self
-                .connection()?
-                .inspect_container(&container.id, None::<InspectContainerOptions>)
-                .await
-                .map_err(|e| format!("failed to inspect proxy container: {}", e))?;
+                // Get the proxy container's bridge IP.
+                let info = self
+                    .connection()?
+                    .inspect_container(&container_id, None::<InspectContainerOptions>)
+                    .await
+                    .map_err(|e| format!("failed to inspect proxy container: {}", e))?;
 
-            let proxy_ip = info
-                .network_settings
-                .and_then(|n| n.networks)
-                .and_then(|networks| {
-                    networks
-                        .values()
-                        .next()
-                        .and_then(|ep| ep.ip_address.clone())
-                })
-                .ok_or_else(|| "proxy container has no bridge IP".to_string())?;
+                let proxy_ip = info
+                    .network_settings
+                    .and_then(|n| n.networks)
+                    .and_then(|networks| {
+                        networks
+                            .values()
+                            .next()
+                            .and_then(|ep| ep.ip_address.clone())
+                    })
+                    .ok_or_else(|| "proxy container has no bridge IP".to_string())?;
 
-            let addr = format!("{}:{}", proxy_ip, port);
+                let addr = format!("{}:{}", proxy_ip, port);
+
+                // Wait for socat to be ready (it installs packages on startup). Bound
+                // each connection attempt so an unreachable proxy bridge IP (e.g. on a
+                // podman/docker machine VM where the host can't dial container IPs)
+                // cannot hang the whole experiment.
+                let ready_addr = format!("{}:{}", proxy_ip, port);
+                let mut ready = false;
+                for attempt in 0..10 {
+                    let connected = tokio::time::timeout(
+                        Duration::from_millis(500),
+                        tokio::net::TcpStream::connect(&ready_addr),
+                    )
+                    .await
+                    .is_ok_and(|r| r.is_ok());
+                    if connected {
+                        debug!("proxy ready after {} attempts", attempt + 1);
+                        ready = true;
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                }
+                if !ready {
+                    return Err(format!(
+                        "proxy container {} never became reachable at {} (socat setup failed)",
+                        container_name, ready_addr
+                    ));
+                }
+
+                Ok(addr)
+            }
+            .await;
+
+            let addr = match setup {
+                Ok(addr) => addr,
+                Err(e) => {
+                    // Roll back the partially-created proxy container so a failed
+                    // link does not leak a container.
+                    let _ = self
+                        .connection()?
+                        .remove_container(
+                            &container_id,
+                            Some(RemoveContainerOptions {
+                                v: true,
+                                force: true,
+                                link: false,
+                            }),
+                        )
+                        .await;
+                    return Err(e);
+                }
+            };
+
             info!(
                 "network link {} created: {} -> {} via {}",
                 id.0, a.id, target, addr
             );
-
-            // Wait for socat to be ready (it installs packages on startup). Bound
-            // each connection attempt so an unreachable proxy bridge IP (e.g. on a
-            // podman/docker machine VM where the host can't dial container IPs)
-            // cannot hang the whole experiment.
-            let ready_addr = format!("{}:{}", proxy_ip, port);
-            let mut ready = false;
-            for attempt in 0..10 {
-                let connected = tokio::time::timeout(
-                    Duration::from_millis(500),
-                    tokio::net::TcpStream::connect(&ready_addr),
-                )
-                .await
-                .is_ok_and(|r| r.is_ok());
-                if connected {
-                    debug!("proxy ready after {} attempts", attempt + 1);
-                    ready = true;
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(500)).await;
-            }
-            if !ready {
-                return Err(format!(
-                    "proxy container {} never became reachable at {} (socat setup failed)",
-                    container_name, ready_addr
-                ));
-            }
 
             self.links.lock().expect("poisoned links lock").insert(
                 id.clone(),
