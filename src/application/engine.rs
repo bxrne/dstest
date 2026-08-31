@@ -23,7 +23,6 @@ pub struct Engine {
 impl Engine {
     pub fn new(resolver: Arc<dyn SubstrateResolver>) -> Self {
         let ctx = BindingContext::new(resolver);
-        set_up_lua(&ctx);
         Engine { ctx }
     }
 
@@ -88,27 +87,4 @@ impl Engine {
             .blast()
             .clone()
     }
-}
-
-/// Publish the `dstest` global table and a `print` helper into the Lua state.
-fn set_up_lua(ctx: &BindingContext) {
-    let globals = ctx.lua.globals();
-    let dstest = ctx
-        .lua
-        .create_table()
-        .expect("failed to create dstest table");
-
-    let _ = globals.set(
-        "print",
-        ctx.lua
-            .create_function(|_, msg: String| {
-                tracing::info!("lua: {}", msg);
-                Ok(())
-            })
-            .expect("failed to create print function"),
-    );
-
-    globals
-        .set("dstest", dstest)
-        .expect("failed to set global dstest");
 }

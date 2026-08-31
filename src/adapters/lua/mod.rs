@@ -24,11 +24,24 @@ pub trait LuaModule {
     fn register(lua: &Lua, dstest: &Table, ctx: &BindingContext) -> mlua::Result<()>;
 }
 
-/// Register every Lua module against the `dstest` global created by the
-/// engine. Called from the composition root.
+/// Set up the script surface and register every Lua module on the `dstest`
+/// global. Called from the composition root; this is where the Lua globals
+/// (`print`, `dstest`) are born, so the engine itself never wires its own
+/// scripting surface.
 pub fn register_all(lua: &Lua, ctx: &BindingContext) -> mlua::Result<()> {
     let globals = lua.globals();
-    let dstest: Table = globals.get("dstest")?;
+
+    // Route Lua `print` through tracing so script output lands in the logs.
+    globals.set(
+        "print",
+        lua.create_function(|_, msg: String| {
+            tracing::info!("lua: {}", msg);
+            Ok(())
+        })?,
+    )?;
+
+    let dstest = lua.create_table()?;
+    globals.set("dstest", dstest.clone())?;
 
     net::Net::register(lua, &dstest, ctx)?;
     dst::Dst::register(lua, &dstest, ctx)?;
