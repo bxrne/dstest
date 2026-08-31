@@ -136,7 +136,7 @@ impl UserData for TcpConnection {
 }
 
 pub fn register(lua: &Lua, dstest: &Table, ctx: &BindingContext) -> Result<()> {
-    let state = Arc::clone(&ctx.state);
+    let state = Arc::clone(ctx.state());
 
     let tcp_fn = lua.create_function(move |lua, (id, port): (String, u16)| {
         let (host, timeout_secs) = {

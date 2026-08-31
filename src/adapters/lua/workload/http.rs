@@ -95,8 +95,8 @@ fn parse_openapi(spec: &str) -> std::result::Result<Vec<HttpReq>, mlua::Error> {
 }
 
 pub fn register(lua: &Lua, workload: &Table, ctx: &BindingContext) -> Result<()> {
-    let state = Arc::clone(&ctx.state);
-    let client = ctx.http.clone();
+    let state = Arc::clone(ctx.state());
+    let client = ctx.http().clone();
 
     let run_fn = lua.create_async_function(move |lua, (id, opts): (String, Table)| {
         let state = Arc::clone(&state);

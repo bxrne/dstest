@@ -37,7 +37,7 @@ fn report_to_table(lua: &Lua, report: &OracleReport) -> Result<Table> {
 }
 
 pub fn register(lua: &Lua, dstest: &Table, ctx: &BindingContext) -> Result<()> {
-    let oracle = Arc::clone(&ctx.oracle);
+    let oracle = Arc::clone(ctx.oracle());
     let oracle_table = lua.create_table()?;
 
     let oracle_clone = Arc::clone(&oracle);
@@ -118,7 +118,7 @@ pub fn register(lua: &Lua, dstest: &Table, ctx: &BindingContext) -> Result<()> {
 
     // Run a function with the oracle enabled, then return the report for that
     // block, projected from the events appended while it ran.
-    let state = Arc::clone(&ctx.state);
+    let state = Arc::clone(ctx.state());
     let oracle_clone = Arc::clone(&oracle);
     let run_fn = lua.create_async_function(move |lua, func: Function| {
         let state = Arc::clone(&state);
@@ -163,7 +163,7 @@ pub fn register(lua: &Lua, dstest: &Table, ctx: &BindingContext) -> Result<()> {
     oracle_table.set("disable", disable_fn)?;
 
     // Report for the whole run, projected from the log.
-    let state = Arc::clone(&ctx.state);
+    let state = Arc::clone(ctx.state());
     let report_fn = lua.create_function(move |lua, ()| {
         let s = state.lock().expect("poisoned engine state lock");
         let report = OracleReport::from_events(s.log.events());

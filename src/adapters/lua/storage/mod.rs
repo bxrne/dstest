@@ -47,7 +47,7 @@ impl LuaModule for Storage {
     fn register(lua: &Lua, dstest: &Table, ctx: &BindingContext) -> Result<()> {
         let storage_table = lua.create_table()?;
 
-        let substrate_slot = Arc::clone(&ctx.substrate);
+        let substrate_slot = Arc::clone(ctx.substrate_slot());
         let attach_fn = lua.create_async_function(move |_, (id, opts): (String, Table)| {
             let substrate = Arc::clone(&substrate_slot);
             async move {
@@ -67,7 +67,7 @@ impl LuaModule for Storage {
         })?;
         storage_table.set("attach", attach_fn)?;
 
-        let substrate_slot = Arc::clone(&ctx.substrate);
+        let substrate_slot = Arc::clone(ctx.substrate_slot());
         let error_fn = lua.create_async_function(move |_, (id, on): (String, bool)| {
             let substrate = Arc::clone(&substrate_slot);
             async move {
@@ -81,7 +81,7 @@ impl LuaModule for Storage {
         })?;
         storage_table.set("error", error_fn)?;
 
-        let substrate_slot = Arc::clone(&ctx.substrate);
+        let substrate_slot = Arc::clone(ctx.substrate_slot());
         let drop_fn = lua.create_async_function(move |_, (id, on): (String, bool)| {
             let substrate = Arc::clone(&substrate_slot);
             async move {
@@ -95,7 +95,7 @@ impl LuaModule for Storage {
         })?;
         storage_table.set("drop_writes", drop_fn)?;
 
-        let substrate_slot = Arc::clone(&ctx.substrate);
+        let substrate_slot = Arc::clone(ctx.substrate_slot());
         let slow_fn = lua.create_async_function(move |_, (id, delay_ms): (String, u64)| {
             let substrate = Arc::clone(&substrate_slot);
             async move {
@@ -109,7 +109,7 @@ impl LuaModule for Storage {
         })?;
         storage_table.set("slow", slow_fn)?;
 
-        let substrate_slot = Arc::clone(&ctx.substrate);
+        let substrate_slot = Arc::clone(ctx.substrate_slot());
         let corrupt_fn = lua.create_async_function(move |_, (id, n): (String, u64)| {
             let substrate = Arc::clone(&substrate_slot);
             async move {
@@ -123,7 +123,7 @@ impl LuaModule for Storage {
         })?;
         storage_table.set("corrupt", corrupt_fn)?;
 
-        let substrate_slot = Arc::clone(&ctx.substrate);
+        let substrate_slot = Arc::clone(ctx.substrate_slot());
         let snapshot_fn = lua.create_async_function(move |_, id: String| {
             let substrate = Arc::clone(&substrate_slot);
             async move {
@@ -137,7 +137,7 @@ impl LuaModule for Storage {
         })?;
         storage_table.set("snapshot", snapshot_fn)?;
 
-        let substrate_slot = Arc::clone(&ctx.substrate);
+        let substrate_slot = Arc::clone(ctx.substrate_slot());
         let restore_fn = lua.create_async_function(move |_, (id, snap): (String, String)| {
             let substrate = Arc::clone(&substrate_slot);
             async move {

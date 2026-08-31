@@ -121,7 +121,7 @@ impl LuaModule for Clock {
         clock_table.set("now", now_fn)?;
 
         // dstest.clock.virtual(subject_id) -> per-subject virtual clock handle.
-        let substrate_slot = Arc::clone(&ctx.substrate);
+        let substrate_slot = Arc::clone(ctx.substrate_slot());
         let virtual_fn = lua.create_function(move |lua, subject_id: String| {
             let substrate = locked_substrate(&substrate_slot)?;
             lua.create_userdata(VirtualClock {

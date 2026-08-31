@@ -7,9 +7,9 @@ use crate::application::context::{BindingContext, locked_substrate};
 use crate::application::usecases::run_step;
 
 pub fn register(_lua: &Lua, dstest: &Table, ctx: &BindingContext) -> Result<()> {
-    let state = Arc::clone(&ctx.state);
-    let oracle = Arc::clone(&ctx.oracle);
-    let substrate = Arc::clone(&ctx.substrate);
+    let state = Arc::clone(ctx.state());
+    let oracle = Arc::clone(ctx.oracle());
+    let substrate = Arc::clone(ctx.substrate_slot());
 
     let run_steps_fn = _lua.create_async_function(move |lua, args: MultiValue| {
         let state = Arc::clone(&state);

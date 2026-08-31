@@ -8,8 +8,8 @@ use crate::domain::event::ExperimentEvent;
 use crate::domain::subject::{Subject, SubjectStatus};
 
 pub fn register(_lua: &Lua, dstest: &Table, ctx: &BindingContext) -> Result<()> {
-    let state = Arc::clone(&ctx.state);
-    let substrate = Arc::clone(&ctx.substrate);
+    let state = Arc::clone(ctx.state());
+    let substrate = Arc::clone(ctx.substrate_slot());
 
     let clear_fn = _lua.create_async_function(move |_, subject_id: String| {
         let state = Arc::clone(&state);

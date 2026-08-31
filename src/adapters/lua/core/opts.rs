@@ -7,10 +7,10 @@ use crate::domain::config::Config;
 use crate::domain::event::ExperimentEvent;
 
 pub fn register(lua: &Lua, dstest: &Table, ctx: &BindingContext) -> Result<()> {
-    let state = Arc::clone(&ctx.state);
-    let resolver = Arc::clone(&ctx.resolver);
-    let substrate_slot = Arc::clone(&ctx.substrate);
-    let workload_rng = Arc::clone(&ctx.workload_rng);
+    let state = Arc::clone(ctx.state());
+    let resolver = Arc::clone(ctx.resolver());
+    let substrate_slot = Arc::clone(ctx.substrate_slot());
+    let workload_rng = Arc::clone(ctx.workload_rng());
 
     let config_fn = lua.create_function(move |lua, tbl: Table| {
         let state = Arc::clone(&state);

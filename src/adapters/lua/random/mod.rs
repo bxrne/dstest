@@ -17,7 +17,7 @@ pub struct Random;
 
 impl LuaModule for Random {
     fn register(lua: &Lua, dstest: &Table, ctx: &BindingContext) -> Result<()> {
-        let rng = Arc::clone(&ctx.workload_rng);
+        let rng = Arc::clone(ctx.workload_rng());
 
         let random_table = lua.create_table()?;
 

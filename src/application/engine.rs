@@ -34,19 +34,19 @@ impl Engine {
 
     /// The Lua state backing this engine.
     pub fn lua(&self) -> &Lua {
-        &self.ctx.lua
+        self.ctx.lua()
     }
 
     /// Run a script, bracketing it with `ScenarioStarted`/`ScenarioCompleted`
     /// events so the log records the scenario lifecycle.
     pub async fn execute(&self, script: &str) -> mlua::Result<()> {
         {
-            let mut s = self.ctx.state.lock().expect("poisoned engine state lock");
+            let mut s = self.ctx.state().lock().expect("poisoned engine state lock");
             s.log.push(ExperimentEvent::ScenarioStarted);
         }
-        let result = self.ctx.lua.load(script).call_async::<()>(()).await;
+        let result = self.ctx.lua().load(script).call_async::<()>(()).await;
         if result.is_ok() {
-            let mut s = self.ctx.state.lock().expect("poisoned engine state lock");
+            let mut s = self.ctx.state().lock().expect("poisoned engine state lock");
             s.log.push(ExperimentEvent::ScenarioCompleted);
         }
         result
@@ -56,20 +56,20 @@ impl Engine {
     /// runtime is still alive; `Drop` remains as a last-resort fallback.
     pub async fn shutdown(&self) {
         if let Ok(substrate) = self.ctx.substrate() {
-            teardown::teardown_all(&self.ctx.state, &substrate).await;
+            teardown::teardown_all(self.ctx.state(), &substrate).await;
         }
     }
 
     /// Final oracle report for the run (used for the process exit code).
     pub fn oracle_report(&self) -> OracleReport {
-        let lock = self.ctx.state.lock().expect("poisoned engine state lock");
+        let lock = self.ctx.state().lock().expect("poisoned engine state lock");
         OracleReport::from_events(lock.log.events())
     }
 
     /// Scope/execution metrics projected from the event log.
     pub fn metrics(&self) -> Metrics {
         self.ctx
-            .state
+            .state()
             .lock()
             .expect("poisoned engine state lock")
             .log
@@ -80,7 +80,7 @@ impl Engine {
     /// Blast-radius projection over the event log.
     pub fn blast_radius(&self) -> BlastRadius {
         self.ctx
-            .state
+            .state()
             .lock()
             .expect("poisoned engine state lock")
             .log

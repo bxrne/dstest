@@ -6,7 +6,7 @@ use crate::application::context::{BindingContext, locked_substrate};
 use crate::domain::subject::{Stream, Subject};
 
 pub fn register(lua: &Lua, dstest: &Table, ctx: &BindingContext) -> Result<()> {
-    let substrate = Arc::clone(&ctx.substrate);
+    let substrate = Arc::clone(ctx.substrate_slot());
 
     let logs_fn = lua.create_async_function(move |lua, (id, opts): (String, Option<Table>)| {
         let substrate = Arc::clone(&substrate);

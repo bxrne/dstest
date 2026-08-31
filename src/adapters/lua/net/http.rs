@@ -30,8 +30,8 @@ pub fn resolve_subject_http(state: &AppState, id: &str) -> mlua::Result<(String,
 }
 
 pub fn register(lua: &Lua, dstest: &Table, ctx: &BindingContext) -> Result<()> {
-    let state = Arc::clone(&ctx.state);
-    let client = ctx.http.clone();
+    let state = Arc::clone(ctx.state());
+    let client = ctx.http().clone();
 
     let http_fn =
         lua.create_async_function(move |lua, (id, method, path): (String, String, String)| {

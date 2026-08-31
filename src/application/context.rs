@@ -16,27 +16,64 @@ use crate::application::state::AppState;
 use crate::ports::{Substrate, SubstrateResolver};
 
 pub struct BindingContext {
-    pub state: Arc<Mutex<AppState>>,
-    pub oracle: Arc<Mutex<CheckRunner>>,
+    state: Arc<Mutex<AppState>>,
+    oracle: Arc<Mutex<CheckRunner>>,
     /// Runtime substrate resolver injected by the composition root. Only
     /// used to build a substrate once the script declares one.
-    pub resolver: Arc<dyn SubstrateResolver>,
+    resolver: Arc<dyn SubstrateResolver>,
     /// The resolved substrate (once `dstest.config()` declares one). Held in
     /// an `RwLock` because `config` runs at script time, after registration.
-    pub substrate: Arc<RwLock<Option<Arc<dyn Substrate>>>>,
+    substrate: Arc<RwLock<Option<Arc<dyn Substrate>>>>,
     /// Seeded workload RNG for `dstest.random.*` (separate stream from the
     /// fault tree's RNG, so workload draws don't affect the fault schedule).
-    pub workload_rng: Arc<Mutex<Option<rand::rngs::StdRng>>>,
+    workload_rng: Arc<Mutex<Option<rand::rngs::StdRng>>>,
     /// Shared HTTP client reused across `dstest.net.http` and the HTTP
     /// workload. `reqwest::Client` pools connections internally; building one
     /// per request discards that pool and pays TLS/connection setup each call.
     /// Per-request timeouts are applied on the `RequestBuilder`, so the
     /// client itself carries no global timeout.
-    pub http: reqwest::Client,
-    pub lua: Lua,
+    http: reqwest::Client,
+    lua: Lua,
 }
 
 impl BindingContext {
+    /// The application state handle.
+    pub fn state(&self) -> &Arc<Mutex<AppState>> {
+        &self.state
+    }
+
+    /// The oracle check runner handle.
+    pub fn oracle(&self) -> &Arc<Mutex<CheckRunner>> {
+        &self.oracle
+    }
+
+    /// The injected substrate resolver (composition root).
+    pub fn resolver(&self) -> &Arc<dyn SubstrateResolver> {
+        &self.resolver
+    }
+
+    /// The substrate resolution slot (a captured `Arc` clone for Lua
+    /// closures).
+    pub fn substrate_slot(&self) -> &Arc<RwLock<Option<Arc<dyn Substrate>>>> {
+        &self.substrate
+    }
+
+    /// The seeded workload RNG slot (a captured `Arc` clone for Lua
+    /// closures).
+    pub fn workload_rng(&self) -> &Arc<Mutex<Option<rand::rngs::StdRng>>> {
+        &self.workload_rng
+    }
+
+    /// The shared HTTP client (cloned cheaply into closures).
+    pub fn http(&self) -> &reqwest::Client {
+        &self.http
+    }
+
+    /// The backing Lua state.
+    pub fn lua(&self) -> &Lua {
+        &self.lua
+    }
+
     pub fn new(resolver: Arc<dyn SubstrateResolver>) -> Self {
         Self {
             state: Arc::new(Mutex::new(AppState::default())),
