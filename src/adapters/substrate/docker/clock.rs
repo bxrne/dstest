@@ -173,7 +173,8 @@ impl DockerClock {
             return Ok(dir);
         }
 
-        fs::create_dir_all(&dir).map_err(|e| format!("failed to create clock assets dir: {}", e))?;
+        fs::create_dir_all(&dir)
+            .map_err(|e| format!("failed to create clock assets dir: {}", e))?;
         let tmp = dir.join("dstest_clock.so.tmp");
         fs::write(&tmp, CLOCK_SHIM_SO).map_err(|e| format!("failed to write clock shim: {}", e))?;
         fs::rename(&tmp, &so_path).map_err(|e| format!("failed to finalize clock shim: {}", e))?;
