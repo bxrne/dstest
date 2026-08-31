@@ -6,7 +6,7 @@
 //! the fault tree registry. Each owns its own invariants; callers go through
 //! methods instead of mutating raw maps.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::Instant;
 
 use crate::application::log::EventLog;
@@ -32,7 +32,10 @@ pub struct SubjectRecord {
 /// "what is running" invariant, instead of several hand-kept collections.
 #[derive(Default)]
 pub struct SubjectRegistry {
-    subjects: Vec<SubjectRecord>,
+    /// Id-keyed registry of live subjects. A map gives O(1) lookup for the
+    /// hot paths (`find`, `config_for`, fault bookkeeping) that the previous
+    /// `Vec` linear scan paid for on every call.
+    subjects: HashMap<String, SubjectRecord>,
     hosts: BTreeMap<String, String>,
     name_counter: usize,
 }
@@ -62,20 +65,20 @@ impl SubjectRegistry {
         if let Some(addr) = host {
             self.hosts.insert(subject.id.clone(), addr);
         }
-        self.subjects.push(subject);
+        self.subjects.insert(subject.id.clone(), subject);
     }
 
     pub fn find(&self, id: &str) -> Option<&SubjectRecord> {
-        self.subjects.iter().find(|r| r.id == id)
+        self.subjects.get(id)
     }
 
     pub fn find_mut(&mut self, id: &str) -> Option<&mut SubjectRecord> {
-        self.subjects.iter_mut().find(|r| r.id == id)
+        self.subjects.get_mut(id)
     }
 
     pub fn ids_for_config(&self, config: &str) -> Vec<String> {
         self.subjects
-            .iter()
+            .values()
             .filter(|r| r.config == config)
             .map(|r| r.id.clone())
             .collect()
@@ -121,7 +124,11 @@ impl SubjectRegistry {
 
     /// Drain the registry for teardown, returning the id/name pairs.
     pub fn drain(&mut self) -> Vec<(String, String)> {
-        let records = self.subjects.drain(..).map(|r| (r.id, r.name)).collect();
+        let records = self
+            .subjects
+            .drain()
+            .map(|(id, r)| (id, r.name))
+            .collect();
         self.hosts.clear();
         records
     }
