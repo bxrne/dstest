@@ -25,8 +25,11 @@ use std::future::Future;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::Mutex;
+use std::time::Duration;
+
+use wait_timeout::ChildExt;
 
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
@@ -547,25 +550,70 @@ impl StorageControl for DockerStorage {
     }
 }
 
-/// Run a command and return its stdout, or an error with stderr.
+/// Bound every host-side command so a hung `dmsetup`/`mount` (e.g. a device
+/// stuck in use) cannot hang the subject or the experiment indefinitely.
+const RUN_CMD_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Run a command and return its stdout, or an error with stderr. The command
+/// is killed if it exceeds [`RUN_CMD_TIMEOUT`]. The output is small (device
+/// mapper control lines), so reading the pipes after the process exits cannot
+/// deadlock on a full pipe.
 fn run_cmd(program: &str, args: &[&str]) -> Result<String, String> {
-    let output = Command::new(program)
+    let mut child = Command::new(program)
         .args(args)
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|e| format!("failed to execute {}: {}", program, e))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
+
+    let timed_out = match child.wait_timeout(RUN_CMD_TIMEOUT) {
+        Ok(Some(_)) => false,
+        Ok(None) => {
+            // Killed on timeout; reap the child so it is not a zombie.
+            let _ = child.kill();
+            let _ = child.wait();
+            true
+        }
+        Err(e) => {
+            let _ = child.kill();
+            return Err(format!("failed to wait for {}: {}", program, e));
+        }
+    };
+
+    let mut stdout = String::new();
+    if let Some(mut out) = child.stdout.take() {
+        let _ = out.read_to_string(&mut stdout);
+    }
+    let mut stderr = String::new();
+    if let Some(mut err) = child.stderr.take() {
+        let _ = err.read_to_string(&mut stderr);
+    }
+
+    if timed_out {
+        return Err(format!(
+            "{} {} timed out after {}s: {} {}",
+            program,
+            args.join(" "),
+            RUN_CMD_TIMEOUT.as_secs(),
+            stdout.trim(),
+            stderr.trim()
+        ));
+    }
+
+    let status = child
+        .wait()
+        .map_err(|e| format!("failed to reap {}: {}", program, e))?;
+    if !status.success() {
         Err(format!(
             "{} {} failed (exit {}): {} {}",
             program,
             args.join(" "),
-            output.status.code().unwrap_or(-1),
+            status.code().unwrap_or(-1),
             stdout.trim(),
             stderr.trim()
         ))
     } else {
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        Ok(stdout)
     }
 }
 
