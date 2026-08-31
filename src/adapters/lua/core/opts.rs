@@ -2,28 +2,36 @@ use std::sync::Arc;
 
 use mlua::{Lua, Result, Table};
 
-use crate::application::context::BindingContext;
+use crate::application::context::{BindingContext, resolve_substrate};
 use crate::domain::config::Config;
 use crate::domain::event::ExperimentEvent;
-use crate::ports::Substrate;
-use crate::ports::components::{NetworkControl, StorageControl};
 
-pub fn register<S: Substrate>(lua: &Lua, dstest: &Table, ctx: &BindingContext<S>) -> Result<()> {
+pub fn register(lua: &Lua, dstest: &Table, ctx: &BindingContext) -> Result<()> {
     let state = Arc::clone(&ctx.state);
-    let substrate = Arc::clone(&ctx.substrate);
+    let resolver = Arc::clone(&ctx.resolver);
+    let substrate_slot = Arc::clone(&ctx.substrate);
     let workload_rng = Arc::clone(&ctx.workload_rng);
 
     let config_fn = lua.create_function(move |lua, tbl: Table| {
         let state = Arc::clone(&state);
-        let substrate = Arc::clone(&substrate);
+        let resolver = Arc::clone(&resolver);
+        let substrate_slot = Arc::clone(&substrate_slot);
         let workload_rng = Arc::clone(&workload_rng);
         let mut cfg = Config::default();
 
         let name: Option<String> = tbl.get("name").ok();
 
-        if let Ok(substrate) = tbl.get::<String>("substrate") {
-            cfg.substrate = Some(substrate);
-        }
+        // Resolve the substrate from the script's declaration. This is the
+        // single point where a concrete substrate is chosen at runtime; no
+        // backend is touched until `setup` actually uses it.
+        let resolved = match tbl.get::<String>("substrate") {
+            Ok(s) => {
+                let resolved = resolve_substrate(&resolver, &substrate_slot, &s)?;
+                cfg.substrate = Some(s);
+                Some(resolved)
+            }
+            Err(_) => None,
+        };
 
         if let Ok(seed) = tbl.get::<u64>("seed") {
             cfg.seed = Some(seed);
@@ -32,10 +40,12 @@ pub fn register<S: Substrate>(lua: &Lua, dstest: &Table, ctx: &BindingContext<S>
             let math: Table = globals.get("math")?;
             let randomseed: mlua::Function = math.get("randomseed")?;
             randomseed.call::<()>(seed)?;
-            // Seed the network impairment RNG.
-            substrate.network().set_seed(seed);
-            // Seed storage fault randomness (e.g. corrupt offsets).
-            substrate.storage().set_seed(seed);
+            if let Some(substrate) = &resolved {
+                // Seed the network impairment RNG.
+                substrate.network().set_seed(seed);
+                // Seed storage fault randomness (e.g. corrupt offsets).
+                substrate.storage().set_seed(seed);
+            }
             // Seed the workload RNG (separate stream from the fault tree).
             *workload_rng.lock().expect("poisoned rng lock") =
                 Some(rand::SeedableRng::seed_from_u64(seed));

@@ -3,11 +3,10 @@ use std::sync::Arc;
 use mlua::{Lua, MultiValue, Result, Table, Value};
 
 use crate::adapters::lua::dst::common::render_step;
-use crate::application::context::BindingContext;
+use crate::application::context::{BindingContext, locked_substrate};
 use crate::application::usecases::run_step;
-use crate::ports::Substrate;
 
-pub fn register<S: Substrate>(_lua: &Lua, dstest: &Table, ctx: &BindingContext<S>) -> Result<()> {
+pub fn register(_lua: &Lua, dstest: &Table, ctx: &BindingContext) -> Result<()> {
     let state = Arc::clone(&ctx.state);
     let oracle = Arc::clone(&ctx.oracle);
     let substrate = Arc::clone(&ctx.substrate);
@@ -18,6 +17,8 @@ pub fn register<S: Substrate>(_lua: &Lua, dstest: &Table, ctx: &BindingContext<S
         let substrate = Arc::clone(&substrate);
 
         async move {
+            let substrate = locked_substrate(&substrate)?;
+
             // run_steps(n) or run_steps(cfg_handle, n)
             let mut args = args.into_iter();
             let (cfg, n) = match (args.next(), args.next()) {

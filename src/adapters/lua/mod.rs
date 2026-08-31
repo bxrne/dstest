@@ -19,15 +19,14 @@ pub mod workload;
 use mlua::{Lua, Table};
 
 use crate::application::BindingContext;
-use crate::ports::Substrate;
 
-pub trait LuaModule<S: Substrate> {
-    fn register(lua: &Lua, dstest: &Table, ctx: &BindingContext<S>) -> mlua::Result<()>;
+pub trait LuaModule {
+    fn register(lua: &Lua, dstest: &Table, ctx: &BindingContext) -> mlua::Result<()>;
 }
 
 /// Register every Lua module against the `dstest` global created by the
 /// engine. Called from the composition root.
-pub fn register_all<S: Substrate>(lua: &Lua, ctx: &BindingContext<S>) -> mlua::Result<()> {
+pub fn register_all(lua: &Lua, ctx: &BindingContext) -> mlua::Result<()> {
     let globals = lua.globals();
     let dstest: Table = globals.get("dstest")?;
 

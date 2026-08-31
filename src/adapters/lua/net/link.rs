@@ -7,18 +7,18 @@ use std::sync::Arc;
 
 use mlua::{Lua, Result, Table, UserData, UserDataMethods};
 
-use crate::application::context::BindingContext;
+use crate::application::context::{BindingContext, locked_substrate};
 use crate::domain::subject::Subject;
 use crate::ports::Substrate;
-use crate::ports::components::{Direction, LinkId, NetworkControl, PartitionMode};
+use crate::ports::components::{Direction, LinkId, PartitionMode};
 
 /// Handle to an established link, obtained via `dstest.net.link(a, b, port)`.
-struct Link<S: Substrate> {
-    substrate: Arc<S>,
+struct Link {
+    substrate: Arc<dyn Substrate>,
     id: LinkId,
 }
 
-impl<S: Substrate> UserData for Link<S> {
+impl UserData for Link {
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
         methods.add_async_method("addr", |_, this, ()| {
             let substrate = Arc::clone(&this.substrate);
@@ -92,12 +92,13 @@ impl<S: Substrate> UserData for Link<S> {
     }
 }
 
-pub fn register<S: Substrate>(lua: &Lua, dstest: &Table, ctx: &BindingContext<S>) -> Result<()> {
+pub fn register(lua: &Lua, dstest: &Table, ctx: &BindingContext) -> Result<()> {
     let substrate = Arc::clone(&ctx.substrate);
 
     let link_fn = lua.create_async_function(move |lua, (a, b, port): (String, String, u16)| {
         let substrate = Arc::clone(&substrate);
         async move {
+            let substrate = locked_substrate(&substrate)?;
             let id = substrate
                 .network()
                 .link(&Subject::new(a), &Subject::new(b), port)

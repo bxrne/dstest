@@ -4,6 +4,9 @@
 //! that can be errored, slowed, corrupted, filled, snapshotted, and restored —
 //! the FoundationDB-style crash-consistency toolbox.
 
+use std::future::Future;
+use std::pin::Pin;
+
 use crate::domain::subject::Subject;
 
 pub const NOT_SUPPORTED: &str = "storage control not supported by this substrate";
@@ -37,38 +40,65 @@ pub trait StorageControl: Send + Sync + 'static {
 
     /// Attach a virtual disk to a subject. Must be called while the subject
     /// is being set up or while it tolerates a new mount appearing.
-    async fn attach(&self, _subject: &Subject, _opts: StorageOpts) -> Result<(), String> {
-        Err(NOT_SUPPORTED.to_string())
+    fn attach<'a>(
+        &'a self,
+        _subject: &'a Subject,
+        _opts: StorageOpts,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async move { Err(NOT_SUPPORTED.to_string()) })
     }
 
     /// Toggle deterministic I/O errors (EIO) on the subject's virtual disk.
-    async fn error(&self, _subject: &Subject, _on: bool) -> Result<(), String> {
-        Err(NOT_SUPPORTED.to_string())
+    fn error<'a>(
+        &'a self,
+        _subject: &'a Subject,
+        _on: bool,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async move { Err(NOT_SUPPORTED.to_string()) })
     }
 
     /// Toggle dropping of writes (acknowledged but never persisted).
-    async fn drop_writes(&self, _subject: &Subject, _on: bool) -> Result<(), String> {
-        Err(NOT_SUPPORTED.to_string())
+    fn drop_writes<'a>(
+        &'a self,
+        _subject: &'a Subject,
+        _on: bool,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async move { Err(NOT_SUPPORTED.to_string()) })
     }
 
     /// Impose per-operation latency on the virtual disk.
-    async fn slow(&self, _subject: &Subject, _delay_ms: u64) -> Result<(), String> {
-        Err(NOT_SUPPORTED.to_string())
+    fn slow<'a>(
+        &'a self,
+        _subject: &'a Subject,
+        _delay_ms: u64,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async move { Err(NOT_SUPPORTED.to_string()) })
     }
 
     /// Corrupt `n` bytes of the virtual disk (bit rot).
-    async fn corrupt(&self, _subject: &Subject, _n: u64) -> Result<(), String> {
-        Err(NOT_SUPPORTED.to_string())
+    fn corrupt<'a>(
+        &'a self,
+        _subject: &'a Subject,
+        _n: u64,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async move { Err(NOT_SUPPORTED.to_string()) })
     }
 
     /// Snapshot the virtual disk; returns an opaque snapshot id.
-    async fn snapshot(&self, _subject: &Subject) -> Result<String, String> {
-        Err(NOT_SUPPORTED.to_string())
+    fn snapshot<'a>(
+        &'a self,
+        _subject: &'a Subject,
+    ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send + 'a>> {
+        Box::pin(async move { Err(NOT_SUPPORTED.to_string()) })
     }
 
     /// Restore a previously taken snapshot (e.g. after a kill, for
     /// crash-consistency testing).
-    async fn restore(&self, _subject: &Subject, _snapshot_id: &str) -> Result<(), String> {
-        Err(NOT_SUPPORTED.to_string())
+    fn restore<'a>(
+        &'a self,
+        _subject: &'a Subject,
+        _snapshot_id: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async move { Err(NOT_SUPPORTED.to_string()) })
     }
 }

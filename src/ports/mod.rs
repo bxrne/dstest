@@ -6,4 +6,4 @@
 pub mod components;
 pub mod substrate;
 
-pub use substrate::{Substrate, ToLua};
+pub use substrate::{Substrate, SubstrateFactory, SubstrateResolver, ToLua};

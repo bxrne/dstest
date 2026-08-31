@@ -29,7 +29,6 @@ use mlua::{Lua, Result, Table};
 
 use crate::adapters::lua::net::http::resolve_subject_http;
 use crate::application::context::BindingContext;
-use crate::ports::Substrate;
 
 #[derive(Clone, Debug)]
 struct HttpReq {
@@ -89,7 +88,7 @@ fn parse_openapi(spec: &str) -> std::result::Result<Vec<HttpReq>, mlua::Error> {
     Ok(reqs)
 }
 
-pub fn register<S: Substrate>(lua: &Lua, workload: &Table, ctx: &BindingContext<S>) -> Result<()> {
+pub fn register(lua: &Lua, workload: &Table, ctx: &BindingContext) -> Result<()> {
     let state = Arc::clone(&ctx.state);
 
     let run_fn = lua.create_async_function(move |lua, (id, opts): (String, Table)| {

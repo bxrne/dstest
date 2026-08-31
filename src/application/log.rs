@@ -193,9 +193,7 @@ mod tests {
             ExperimentEvent::ScenarioStarted,
             ExperimentEvent::StateEnumerated { unique: true },
             ExperimentEvent::StateEnumerated { unique: false },
-            ExperimentEvent::FaultApplied {
-                fault: Fault::Kill,
-            },
+            ExperimentEvent::FaultApplied { fault: Fault::Kill },
             ExperimentEvent::FaultApplied {
                 fault: Fault::Pause,
             },

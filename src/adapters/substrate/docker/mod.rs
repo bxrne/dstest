@@ -1,7 +1,10 @@
+use std::any::Any;
 use std::collections::HashMap;
 use std::fmt::{self, Display};
 use std::fs;
-use std::sync::Mutex;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use bollard::Docker as BollardDocker;
 use bollard::container::LogOutput;
@@ -21,7 +24,8 @@ use tracing::{debug, info, warn};
 
 use crate::domain::fault::Fault;
 use crate::domain::subject::{ExecResult, HostedSubject, LogEntry, Stream, Subject, SubjectStatus};
-use crate::ports::{Substrate, ToLua};
+use crate::ports::components::{ClockControl, NetworkControl, StorageControl};
+use crate::ports::{Substrate, SubstrateFactory, ToLua};
 
 pub mod clock;
 pub mod network;
@@ -32,7 +36,7 @@ use network::DockerNetwork;
 use storage::{DockerStorage, StorageSpec};
 
 pub struct Docker {
-    connection: BollardDocker,
+    connection: OnceLock<Result<BollardDocker, String>>,
     original_limits: Mutex<HashMap<String, OriginalLimits>>,
     clock: DockerClock,
     network: DockerNetwork,
@@ -50,16 +54,32 @@ struct OriginalLimits {
 }
 
 impl Docker {
+    /// Build a Docker substrate without touching the daemon. The connection
+    /// is established lazily on first use, so merely declaring the substrate
+    /// (or even building the engine) never starts up a Docker daemon.
     pub fn new() -> Result<Self, String> {
-        let connection = BollardDocker::connect_with_local_defaults()
-            .map_err(|e| format!("Failed to connect to Docker: {}", e))?;
         Ok(Self {
-            clock: DockerClock::new(connection.clone()),
-            network: DockerNetwork::new(connection.clone()),
+            clock: DockerClock::new(),
+            network: DockerNetwork::new(),
             storage: DockerStorage::new(),
-            connection,
+            connection: OnceLock::new(),
             original_limits: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// The runtime-resolvable factory that lets the composition root register
+    /// Docker for dispatch by the script's `substrate = "docker"` field.
+    pub fn factory() -> Box<dyn SubstrateFactory> {
+        Box::new(DockerFactory)
+    }
+
+    /// Lazily connect to the Docker daemon, once, on first actual use.
+    pub(crate) fn connection(&self) -> Result<&BollardDocker, String> {
+        let init = self.connection.get_or_init(|| {
+            BollardDocker::connect_with_local_defaults()
+                .map_err(|e| format!("Failed to connect to Docker: {}", e))
+        });
+        init.as_ref().map_err(|e| e.clone())
     }
 
     /// Pull an image (shared by subject hosting and clock asset builds).
@@ -76,6 +96,19 @@ impl Docker {
         .await
         .map_err(|e| format!("Failed to pull image: {}", e))?;
         Ok(())
+    }
+}
+
+/// Concrete factory registrable in the runtime substrate registry.
+pub struct DockerFactory;
+
+impl SubstrateFactory for DockerFactory {
+    fn name(&self) -> &'static str {
+        "docker"
+    }
+
+    fn build(&self) -> Result<Arc<dyn Substrate>, String> {
+        Ok(Arc::new(Docker::new()?))
     }
 }
 
@@ -108,7 +141,7 @@ pub struct DockerInspect {
 }
 
 impl ToLua for DockerInspect {
-    fn to_lua(self, lua: &mlua::Lua) -> mlua::Result<mlua::Value> {
+    fn to_lua(self: Box<Self>, lua: &mlua::Lua) -> mlua::Result<mlua::Value> {
         let t = lua.create_table()?;
         t.set("state", self.state.to_string())?;
         t.set("pid", self.pid)?;
@@ -154,16 +187,11 @@ pub struct DockerSubjectData {
 }
 
 impl Substrate for Docker {
-    const NAME: &'static str = "docker";
+    fn name(&self) -> &'static str {
+        "docker"
+    }
 
-    type SubjectData = DockerSubjectData;
-    type Inspect = DockerInspect;
-    type LogOpts = DockerLogOpts;
-    type Clock = DockerClock;
-    type Network = DockerNetwork;
-    type Storage = DockerStorage;
-
-    fn parse_subject(&self, table: &mlua::Table) -> Result<Self::SubjectData, String> {
+    fn parse_subject(&self, table: &mlua::Table) -> Result<Box<dyn Any + Send + Sync>, String> {
         let image: String = table
             .get("image")
             .map_err(|_| "setup requires `image` field".to_string())?;
@@ -215,433 +243,488 @@ impl Substrate for Docker {
             network_proxied,
             storage,
         })
+        .map(|d| Box::new(d) as Box<dyn Any + Send + Sync>)
     }
 
-    fn parse_log_opts(&self, table: Option<&mlua::Table>) -> Result<Self::LogOpts, String> {
+    fn parse_log_opts(
+        &self,
+        table: Option<&mlua::Table>,
+    ) -> Result<Box<dyn Any + Send + Sync>, String> {
         let Some(table) = table else {
-            return Ok(DockerLogOpts::default());
+            return Ok(Box::new(DockerLogOpts::default()));
         };
-        Ok(DockerLogOpts {
+        Ok(Box::new(DockerLogOpts {
             stdout: table.get("stdout").unwrap_or(true),
             stderr: table.get("stderr").unwrap_or(true),
             tail: table.get("tail").ok(),
             since: table.get("since").ok(),
             timestamps: table.get("timestamps").unwrap_or(false),
+        }))
+    }
+
+    fn host<'a>(
+        &'a self,
+        name: &'a str,
+        data: &'a (dyn Any + Sync),
+    ) -> Pin<Box<dyn Future<Output = Result<HostedSubject, String>> + Send + 'a>> {
+        Box::pin(async move {
+            let data = (data as &dyn Any)
+                .downcast_ref::<DockerSubjectData>()
+                .ok_or_else(|| "host: subject data is not DockerSubjectData".to_string())?;
+            let conn = self.connection()?;
+
+            Self::pull_image(conn, &data.image).await?;
+
+            // Virtual clock opt-in: prepare libfaketime env + control-file mount.
+            let clock_prep = match &data.clock {
+                Some(spec) => Some(self.clock.prepare(name, spec).await?),
+                None => None,
+            };
+
+            let mut env = data.env.clone().unwrap_or_default();
+            let mut binds = data.volumes.clone().unwrap_or_default();
+            if let Some(prep) = &clock_prep {
+                env.extend(prep.env.iter().cloned());
+                binds.push(prep.bind.clone());
+            }
+
+            // Virtual disk opt-in: prepare dm-flakey device + bind mount.
+            // If later host steps fail, discard the pending device so we don't
+            // leak loop/dm resources.
+            let storage_prep = match &data.storage {
+                Some(spec) => Some(self.storage.prepare(name, spec)?),
+                None => None,
+            };
+            if let Some(prep) = &storage_prep {
+                binds.push(prep.bind.clone());
+            }
+
+            let host_result = async {
+                let mut labels = HashMap::new();
+                labels.insert("dstest.managed".to_string(), "true".to_string());
+
+                let container_config = ContainerCreateBody {
+                    image: Some(data.image.clone()),
+                    cmd: data.cmd.clone(),
+                    labels: Some(labels),
+                    exposed_ports: data
+                        .ports
+                        .as_ref()
+                        .map(|ports| ports.iter().map(|p| format!("{}/tcp", p)).collect()),
+                    host_config: Some(HostConfig {
+                        runtime: data.runtime.clone(),
+                        // Host port "0" => Docker assigns an ephemeral port, so
+                        // multiple subjects (and parallel experiments) never collide.
+                        port_bindings: data.ports.as_ref().map(|ports| {
+                            let mut map: HashMap<String, Option<Vec<PortBinding>>> = HashMap::new();
+                            for p in ports {
+                                map.insert(
+                                    format!("{}/tcp", p),
+                                    Some(vec![PortBinding {
+                                        host_ip: None,
+                                        host_port: Some("0".to_string()),
+                                    }]),
+                                );
+                            }
+                            map
+                        }),
+                        binds: if binds.is_empty() { None } else { Some(binds) },
+                        // Proxied subjects get host.docker.internal so they can dial
+                        // proxy listeners on the host.
+                        extra_hosts: if data.network_proxied {
+                            Some(vec!["host.docker.internal:host-gateway".to_string()])
+                        } else {
+                            None
+                        },
+                        ..Default::default()
+                    }),
+                    env: if env.is_empty() { None } else { Some(env) },
+                    ..Default::default()
+                };
+
+                let options = CreateContainerOptions {
+                    name: Some(name.to_string()),
+                    ..Default::default()
+                };
+
+                let container = match conn
+                    .create_container(Some(options.clone()), container_config.clone())
+                    .await
+                {
+                    Ok(c) => c,
+                    Err(BollardError::DockerResponseServerError {
+                        status_code: 409, ..
+                    }) => {
+                        // Name collision: remove the stale dstest-managed container
+                        // holding this name, then retry once.
+                        self.remove_stale(name).await?;
+                        conn.create_container(Some(options), container_config)
+                            .await
+                            .map_err(|e| format!("Failed to create container: {}", e))?
+                    }
+                    Err(e) => return Err(format!("Failed to create container: {}", e)),
+                };
+
+                let container_id = container.id.clone();
+                conn.start_container(&container_id, None::<StartContainerOptions>)
+                    .await
+                    .map_err(|e| format!("Failed to start container: {}", e))?;
+
+                let info = conn
+                    .inspect_container(&container_id, None::<InspectContainerOptions>)
+                    .await
+                    .map_err(|e| format!("Inspect after start failed: {}", e))?;
+
+                // Discover the ephemeral host ports Docker assigned.
+                let addr = data.ports.as_ref().and_then(|ports| {
+                    ports.first().and_then(|p| {
+                        Self::host_port_for(&info, *p).map(|hp| format!("localhost:{}", hp))
+                    })
+                });
+
+                let originals = info
+                    .host_config
+                    .as_ref()
+                    .map(|hc| OriginalLimits {
+                        memory: hc.memory,
+                        memory_swap: hc.memory_swap,
+                        cpu_period: hc.cpu_period,
+                        cpu_quota: hc.cpu_quota,
+                        blkio_weight: hc.blkio_weight,
+                    })
+                    .unwrap_or_default();
+                self.original_limits
+                    .lock()
+                    .expect("poisoned limits lock")
+                    .insert(container_id.clone(), originals);
+
+                if let Some(prep) = clock_prep {
+                    self.clock.register(container_id.clone(), prep.ctl_path);
+                }
+
+                if let Some(prep) = &storage_prep {
+                    self.storage.register(container_id.clone(), &prep.dm_name);
+                }
+
+                Ok((container_id, addr))
+            }
+            .await;
+
+            let (container_id, addr) = match host_result {
+                Ok(v) => v,
+                Err(e) => {
+                    if let Some(prep) = &storage_prep {
+                        self.storage.discard(&prep.dm_name);
+                    }
+                    return Err(e);
+                }
+            };
+
+            info!("Started container name={} id={}", name, container_id);
+            Ok(HostedSubject {
+                id: container_id,
+                addr,
+            })
         })
     }
 
-    async fn host(&self, name: &str, data: &Self::SubjectData) -> Result<HostedSubject, String> {
-        let conn = &self.connection;
+    fn affect<'a>(
+        &'a self,
+        subject: &'a Subject,
+        fault: &'a Fault,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async move {
+            let id = Self::container_id(subject).to_string();
 
-        Self::pull_image(conn, &data.image).await?;
+            match fault {
+                Fault::Pause => match self.connection()?.pause_container(&id).await {
+                    Ok(_) => info!("Paused container id={}", id),
+                    Err(BollardError::DockerResponseServerError {
+                        status_code: 409, ..
+                    }) => debug!("Container id={} already paused", id),
+                    Err(e) => return Err(format!("Failed to pause container {}: {}", id, e)),
+                },
+                Fault::Kill => match self.connection()?.kill_container(&id, None).await {
+                    Ok(_) => info!("Killed container id={}", id),
+                    Err(BollardError::DockerResponseServerError {
+                        status_code: 409, ..
+                    }) => debug!("Container id={} not running", id),
+                    Err(e) => return Err(format!("Failed to kill container {}: {}", id, e)),
+                },
+                Fault::Deprive(tier) => {
+                    info!("Depriving container id={} tier={}", id, tier);
+                    self.deprive_resource(subject, tier).await?;
+                }
+            }
+            Ok(())
+        })
+    }
 
-        // Virtual clock opt-in: prepare libfaketime env + control-file mount.
-        let clock_prep = match &data.clock {
-            Some(spec) => Some(self.clock.prepare(name, spec).await?),
-            None => None,
-        };
+    fn clear_faults<'a>(
+        &'a self,
+        subject: &'a Subject,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async move {
+            let id = Self::container_id(subject).to_string();
+            info!("Clearing faults id={}", id);
 
-        let mut env = data.env.clone().unwrap_or_default();
-        let mut binds = data.volumes.clone().unwrap_or_default();
-        if let Some(prep) = &clock_prep {
-            env.extend(prep.env.iter().cloned());
-            binds.push(prep.bind.clone());
-        }
-
-        // Virtual disk opt-in: prepare dm-flakey device + bind mount.
-        // If later host steps fail, discard the pending device so we don't
-        // leak loop/dm resources.
-        let storage_prep = match &data.storage {
-            Some(spec) => Some(self.storage.prepare(name, spec)?),
-            None => None,
-        };
-        if let Some(prep) = &storage_prep {
-            binds.push(prep.bind.clone());
-        }
-
-        let host_result = async {
-            let mut labels = HashMap::new();
-            labels.insert("dstest.managed".to_string(), "true".to_string());
-
-            let container_config = ContainerCreateBody {
-                image: Some(data.image.clone()),
-                cmd: data.cmd.clone(),
-                labels: Some(labels),
-                exposed_ports: data
-                    .ports
-                    .as_ref()
-                    .map(|ports| ports.iter().map(|p| format!("{}/tcp", p)).collect()),
-                host_config: Some(HostConfig {
-                    runtime: data.runtime.clone(),
-                    // Host port "0" => Docker assigns an ephemeral port, so
-                    // multiple subjects (and parallel experiments) never collide.
-                    port_bindings: data.ports.as_ref().map(|ports| {
-                        let mut map: HashMap<String, Option<Vec<PortBinding>>> = HashMap::new();
-                        for p in ports {
-                            map.insert(
-                                format!("{}/tcp", p),
-                                Some(vec![PortBinding {
-                                    host_ip: None,
-                                    host_port: Some("0".to_string()),
-                                }]),
-                            );
-                        }
-                        map
-                    }),
-                    binds: if binds.is_empty() { None } else { Some(binds) },
-                    // Proxied subjects get host.docker.internal so they can dial
-                    // proxy listeners on the host.
-                    extra_hosts: if data.network_proxied {
-                        Some(vec!["host.docker.internal:host-gateway".to_string()])
-                    } else {
-                        None
-                    },
-                    ..Default::default()
-                }),
-                env: if env.is_empty() { None } else { Some(env) },
-                ..Default::default()
-            };
-
-            let options = CreateContainerOptions {
-                name: Some(name.to_string()),
-                ..Default::default()
-            };
-
-            let container = match conn
-                .create_container(Some(options.clone()), container_config.clone())
-                .await
-            {
-                Ok(c) => c,
+            match self.connection()?.unpause_container(&id).await {
+                Ok(_) => debug!("Unpaused container id={}", id),
                 Err(BollardError::DockerResponseServerError {
                     status_code: 409, ..
-                }) => {
-                    // Name collision: remove the stale dstest-managed container
-                    // holding this name, then retry once.
-                    self.remove_stale(name).await?;
-                    conn.create_container(Some(options), container_config)
-                        .await
-                        .map_err(|e| format!("Failed to create container: {}", e))?
-                }
-                Err(e) => return Err(format!("Failed to create container: {}", e)),
+                }) => {}
+                Err(BollardError::DockerResponseServerError {
+                    status_code: 404, ..
+                }) => {}
+                Err(e) => debug!("Failed to unpause container id={} error=\"{}\"", id, e),
+            }
+
+            self.restart_if_killed(subject).await?;
+            self.reconnect_network(subject).await?;
+            self.restore_resource_limits(subject).await?;
+
+            Ok(())
+        })
+    }
+
+    fn teardown<'a>(
+        &'a self,
+        subject: Subject,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async move {
+            let id = Self::container_id(&subject).to_string();
+            info!("Tearing down container id={}", id);
+
+            self.connection()?
+                .stop_container(&id, None)
+                .await
+                .map_err(|e| format!("Failed to stop container: {}", e))?;
+
+            let options = RemoveContainerOptions {
+                v: true,
+                force: true,
+                link: false,
             };
-
-            let container_id = container.id.clone();
-            conn.start_container(&container_id, None::<StartContainerOptions>)
+            self.connection()?
+                .remove_container(&id, Some(options))
                 .await
-                .map_err(|e| format!("Failed to start container: {}", e))?;
+                .map_err(|e| format!("Failed to remove container: {}", e))?;
 
-            let info = conn
-                .inspect_container(&container_id, None::<InspectContainerOptions>)
-                .await
-                .map_err(|e| format!("Inspect after start failed: {}", e))?;
-
-            // Discover the ephemeral host ports Docker assigned.
-            let addr = data.ports.as_ref().and_then(|ports| {
-                ports.first().and_then(|p| {
-                    Self::host_port_for(&info, *p).map(|hp| format!("localhost:{}", hp))
-                })
-            });
-
-            let originals = info
-                .host_config
-                .as_ref()
-                .map(|hc| OriginalLimits {
-                    memory: hc.memory,
-                    memory_swap: hc.memory_swap,
-                    cpu_period: hc.cpu_period,
-                    cpu_quota: hc.cpu_quota,
-                    blkio_weight: hc.blkio_weight,
-                })
-                .unwrap_or_default();
             self.original_limits
                 .lock()
                 .expect("poisoned limits lock")
-                .insert(container_id.clone(), originals);
+                .remove(&id);
 
-            if let Some(prep) = clock_prep {
-                self.clock.register(container_id.clone(), prep.ctl_path);
-            }
+            self.clock.unregister(&id);
+            self.network.unregister_subject(&id);
+            self.storage.unregister(&id);
 
-            if let Some(prep) = &storage_prep {
-                self.storage.register(container_id.clone(), &prep.dm_name);
-            }
-
-            Ok((container_id, addr))
-        }
-        .await;
-
-        let (container_id, addr) = match host_result {
-            Ok(v) => v,
-            Err(e) => {
-                if let Some(prep) = &storage_prep {
-                    self.storage.discard(&prep.dm_name);
-                }
-                return Err(e);
-            }
-        };
-
-        info!("Started container name={} id={}", name, container_id);
-        Ok(HostedSubject {
-            id: container_id,
-            addr,
+            Ok(())
         })
     }
 
-    async fn affect(&self, subject: &Subject, fault: &Fault) -> Result<(), String> {
-        let id = Self::container_id(subject).to_string();
+    fn logs<'a>(
+        &'a self,
+        subject: &'a Subject,
+        opts: Box<dyn Any + Send + Sync>,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<LogEntry>, String>> + Send + 'a>> {
+        Box::pin(async move {
+            let opts = opts
+                .downcast::<DockerLogOpts>()
+                .map_err(|_| "logs: options are not DockerLogOpts".to_string())?;
+            let id = Self::container_id(subject).to_string();
 
-        match fault {
-            Fault::Pause => match self.connection.pause_container(&id).await {
-                Ok(_) => info!("Paused container id={}", id),
-                Err(BollardError::DockerResponseServerError {
-                    status_code: 409, ..
-                }) => debug!("Container id={} already paused", id),
-                Err(e) => return Err(format!("Failed to pause container {}: {}", id, e)),
-            },
-            Fault::Kill => match self.connection.kill_container(&id, None).await {
-                Ok(_) => info!("Killed container id={}", id),
-                Err(BollardError::DockerResponseServerError {
-                    status_code: 409, ..
-                }) => debug!("Container id={} not running", id),
-                Err(e) => return Err(format!("Failed to kill container {}: {}", id, e)),
-            },
-            Fault::Deprive(tier) => {
-                info!("Depriving container id={} tier={}", id, tier);
-                self.deprive_resource(subject, tier).await?;
+            let mut builder = LogsOptionsBuilder::new()
+                .stdout(opts.stdout)
+                .stderr(opts.stderr)
+                .timestamps(opts.timestamps);
+
+            if let Some(tail) = opts.tail {
+                builder = builder.tail(&tail);
             }
-        }
-        Ok(())
+            if let Some(since) = opts.since {
+                builder = builder.since(since);
+            }
+
+            let options = builder.build();
+
+            let stream = self
+                .connection()?
+                .logs(&id, Some(options))
+                .try_collect::<Vec<_>>()
+                .await
+                .map_err(|e| format!("Failed to get logs: {}", e))?;
+
+            stream
+                .into_iter()
+                .filter_map(|entry| match entry {
+                    LogOutput::StdOut { message } => Some(LogEntry {
+                        stream: Stream::StdOut,
+                        message: String::from_utf8_lossy(&message).to_string(),
+                    }),
+                    LogOutput::StdErr { message } => Some(LogEntry {
+                        stream: Stream::StdErr,
+                        message: String::from_utf8_lossy(&message).to_string(),
+                    }),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(Ok)
+                .collect()
+        })
     }
 
-    async fn clear_faults(&self, subject: &Subject) -> Result<(), String> {
-        let id = Self::container_id(subject).to_string();
-        info!("Clearing faults id={}", id);
+    fn inspect<'a>(
+        &'a self,
+        subject: &'a Subject,
+    ) -> Pin<Box<dyn Future<Output = Result<Box<dyn ToLua + Send>, String>> + Send + 'a>> {
+        Box::pin(async move {
+            let id = Self::container_id(subject).to_string();
 
-        match self.connection.unpause_container(&id).await {
-            Ok(_) => debug!("Unpaused container id={}", id),
-            Err(BollardError::DockerResponseServerError {
-                status_code: 409, ..
-            }) => {}
-            Err(BollardError::DockerResponseServerError {
-                status_code: 404, ..
-            }) => {}
-            Err(e) => debug!("Failed to unpause container id={} error=\"{}\"", id, e),
-        }
+            let info = self
+                .connection()?
+                .inspect_container(&id, None::<InspectContainerOptions>)
+                .await
+                .map_err(|e| format!("Inspect failed: {}", e))?;
 
-        self.restart_if_killed(subject).await?;
-        self.reconnect_network(subject).await?;
-        self.restore_resource_limits(subject).await?;
+            let state = match info.state.as_ref().and_then(|s| s.status) {
+                Some(ContainerStateStatusEnum::RUNNING) => DockerState::Running,
+                Some(ContainerStateStatusEnum::PAUSED) => DockerState::Paused,
+                Some(ContainerStateStatusEnum::EXITED) => DockerState::Exited,
+                Some(ContainerStateStatusEnum::DEAD) => DockerState::Dead,
+                _ => DockerState::Dead,
+            };
 
-        Ok(())
-    }
-
-    async fn teardown(&self, subject: Subject) -> Result<(), String> {
-        let id = Self::container_id(&subject).to_string();
-        info!("Tearing down container id={}", id);
-
-        self.connection
-            .stop_container(&id, None)
-            .await
-            .map_err(|e| format!("Failed to stop container: {}", e))?;
-
-        let options = RemoveContainerOptions {
-            v: true,
-            force: true,
-            link: false,
-        };
-        self.connection
-            .remove_container(&id, Some(options))
-            .await
-            .map_err(|e| format!("Failed to remove container: {}", e))?;
-
-        self.original_limits
-            .lock()
-            .expect("poisoned limits lock")
-            .remove(&id);
-
-        self.clock.unregister(&id);
-        self.network.unregister_subject(&id);
-        self.storage.unregister(&id);
-
-        Ok(())
-    }
-
-    async fn logs(&self, subject: &Subject, opts: DockerLogOpts) -> Result<Vec<LogEntry>, String> {
-        let id = Self::container_id(subject).to_string();
-
-        let mut builder = LogsOptionsBuilder::new()
-            .stdout(opts.stdout)
-            .stderr(opts.stderr)
-            .timestamps(opts.timestamps);
-
-        if let Some(tail) = opts.tail {
-            builder = builder.tail(&tail);
-        }
-        if let Some(since) = opts.since {
-            builder = builder.since(since);
-        }
-
-        let options = builder.build();
-
-        let stream = self
-            .connection
-            .logs(&id, Some(options))
-            .try_collect::<Vec<_>>()
-            .await
-            .map_err(|e| format!("Failed to get logs: {}", e))?;
-
-        stream
-            .into_iter()
-            .filter_map(|entry| match entry {
-                LogOutput::StdOut { message } => Some(LogEntry {
-                    stream: Stream::StdOut,
-                    message: String::from_utf8_lossy(&message).to_string(),
+            Ok(DockerInspect {
+                state,
+                pid: info.state.as_ref().and_then(|s| s.pid.map(|p| p as u32)),
+                ip: info
+                    .network_settings
+                    .and_then(|n| n.networks)
+                    .and_then(|networks| {
+                        networks
+                            .values()
+                            .next()
+                            .and_then(|endpoint| endpoint.ip_address.clone())
+                    }),
+                memory_limit: info
+                    .host_config
+                    .as_ref()
+                    .and_then(|h| h.memory.map(|m| m as u64)),
+                cpu_quota: info.host_config.as_ref().and_then(|h| {
+                    h.cpu_quota
+                        .zip(h.cpu_period)
+                        .filter(|(q, p)| *q > 0 && *p > 0)
+                        .map(|(q, p)| q as f64 / p as f64)
                 }),
-                LogOutput::StdErr { message } => Some(LogEntry {
-                    stream: Stream::StdErr,
-                    message: String::from_utf8_lossy(&message).to_string(),
-                }),
-                _ => None,
             })
-            .collect::<Vec<_>>()
-            .into_iter()
-            .map(Ok)
-            .collect()
-    }
-
-    async fn inspect(&self, subject: &Subject) -> Result<DockerInspect, String> {
-        let id = Self::container_id(subject).to_string();
-
-        let info = self
-            .connection
-            .inspect_container(&id, None::<InspectContainerOptions>)
-            .await
-            .map_err(|e| format!("Inspect failed: {}", e))?;
-
-        let state = match info.state.as_ref().and_then(|s| s.status) {
-            Some(ContainerStateStatusEnum::RUNNING) => DockerState::Running,
-            Some(ContainerStateStatusEnum::PAUSED) => DockerState::Paused,
-            Some(ContainerStateStatusEnum::EXITED) => DockerState::Exited,
-            Some(ContainerStateStatusEnum::DEAD) => DockerState::Dead,
-            _ => DockerState::Dead,
-        };
-
-        Ok(DockerInspect {
-            state,
-            pid: info.state.as_ref().and_then(|s| s.pid.map(|p| p as u32)),
-            ip: info
-                .network_settings
-                .and_then(|n| n.networks)
-                .and_then(|networks| {
-                    networks
-                        .values()
-                        .next()
-                        .and_then(|endpoint| endpoint.ip_address.clone())
-                }),
-            memory_limit: info
-                .host_config
-                .as_ref()
-                .and_then(|h| h.memory.map(|m| m as u64)),
-            cpu_quota: info.host_config.as_ref().and_then(|h| {
-                h.cpu_quota
-                    .zip(h.cpu_period)
-                    .filter(|(q, p)| *q > 0 && *p > 0)
-                    .map(|(q, p)| q as f64 / p as f64)
-            }),
+            .map(|i| Box::new(i) as Box<dyn ToLua + Send>)
         })
     }
 
-    async fn exec(&self, subject: &Subject, cmd: &[String]) -> Result<ExecResult, String> {
-        let id = Self::container_id(subject).to_string();
+    fn exec<'a>(
+        &'a self,
+        subject: &'a Subject,
+        cmd: &'a [String],
+    ) -> Pin<Box<dyn Future<Output = Result<ExecResult, String>> + Send + 'a>> {
+        Box::pin(async move {
+            let id = Self::container_id(subject).to_string();
 
-        let config = CreateExecOptions {
-            attach_stdout: Some(true),
-            attach_stderr: Some(true),
-            cmd: Some(cmd.iter().map(|s| s.as_str()).collect()),
-            ..Default::default()
-        };
-        let exec = self
-            .connection
-            .create_exec(&id, config)
-            .await
-            .map_err(|e| format!("Create exec failed: {}", e))?;
+            let config = CreateExecOptions {
+                attach_stdout: Some(true),
+                attach_stderr: Some(true),
+                cmd: Some(cmd.iter().map(|s| s.as_str()).collect()),
+                ..Default::default()
+            };
+            let exec = self
+                .connection()?
+                .create_exec(&id, config)
+                .await
+                .map_err(|e| format!("Create exec failed: {}", e))?;
 
-        let result = self
-            .connection
-            .start_exec(&exec.id, Some(StartExecOptions::default()))
-            .await
-            .map_err(|e| format!("Start exec failed: {}", e))?;
+            let result = self
+                .connection()?
+                .start_exec(&exec.id, Some(StartExecOptions::default()))
+                .await
+                .map_err(|e| format!("Start exec failed: {}", e))?;
 
-        let (stdout, stderr) = match result {
-            StartExecResults::Attached { output, .. } => {
-                let entries = output
-                    .try_collect::<Vec<_>>()
-                    .await
-                    .map_err(|e| format!("Exec output failed: {}", e))?;
+            let (stdout, stderr) = match result {
+                StartExecResults::Attached { output, .. } => {
+                    let entries = output
+                        .try_collect::<Vec<_>>()
+                        .await
+                        .map_err(|e| format!("Exec output failed: {}", e))?;
 
-                let mut stdout = String::new();
-                let mut stderr = String::new();
+                    let mut stdout = String::new();
+                    let mut stderr = String::new();
 
-                for entry in entries {
-                    match entry {
-                        LogOutput::StdOut { message } => {
-                            stdout.push_str(&String::from_utf8_lossy(&message));
+                    for entry in entries {
+                        match entry {
+                            LogOutput::StdOut { message } => {
+                                stdout.push_str(&String::from_utf8_lossy(&message));
+                            }
+                            LogOutput::StdErr { message } => {
+                                stderr.push_str(&String::from_utf8_lossy(&message));
+                            }
+                            _ => {}
                         }
-                        LogOutput::StdErr { message } => {
-                            stderr.push_str(&String::from_utf8_lossy(&message));
-                        }
-                        _ => {}
                     }
+                    (stdout, stderr)
                 }
-                (stdout, stderr)
-            }
-            StartExecResults::Detached => (String::new(), String::new()),
-        };
+                StartExecResults::Detached => (String::new(), String::new()),
+            };
 
-        let inspect = self
-            .connection
-            .inspect_exec(&exec.id)
-            .await
-            .map_err(|e| format!("Inspect exec failed: {}", e))?;
+            let inspect = self
+                .connection()?
+                .inspect_exec(&exec.id)
+                .await
+                .map_err(|e| format!("Inspect exec failed: {}", e))?;
 
-        Ok(ExecResult {
-            exit_code: inspect.exit_code.unwrap_or(-1) as i32,
-            stdout,
-            stderr,
+            Ok(ExecResult {
+                exit_code: inspect.exit_code.unwrap_or(-1) as i32,
+                stdout,
+                stderr,
+            })
         })
     }
 
-    async fn status(&self, subject: &Subject) -> Result<SubjectStatus, String> {
-        let id = Self::container_id(subject).to_string();
+    fn status<'a>(
+        &'a self,
+        subject: &'a Subject,
+    ) -> Pin<Box<dyn Future<Output = Result<SubjectStatus, String>> + Send + 'a>> {
+        Box::pin(async move {
+            let id = Self::container_id(subject).to_string();
 
-        let info = self
-            .connection
-            .inspect_container(&id, None::<InspectContainerOptions>)
-            .await
-            .map_err(|e| format!("Inspect failed for status: {}", e))?;
+            let info = self
+                .connection()?
+                .inspect_container(&id, None::<InspectContainerOptions>)
+                .await
+                .map_err(|e| format!("Inspect failed for status: {}", e))?;
 
-        let state = info.state.and_then(|s| s.status);
-        match state {
-            Some(ContainerStateStatusEnum::RUNNING) => Ok(SubjectStatus::Running),
-            Some(ContainerStateStatusEnum::PAUSED) => Ok(SubjectStatus::Pending),
-            Some(ContainerStateStatusEnum::CREATED) => Ok(SubjectStatus::Pending),
-            Some(ContainerStateStatusEnum::RESTARTING) => Ok(SubjectStatus::Pending),
-            Some(ContainerStateStatusEnum::REMOVING) => Ok(SubjectStatus::Pending),
-            Some(ContainerStateStatusEnum::EXITED) => Ok(SubjectStatus::Terminated),
-            Some(ContainerStateStatusEnum::DEAD) => Ok(SubjectStatus::Terminated),
-            _ => Ok(SubjectStatus::Terminated),
-        }
+            let state = info.state.and_then(|s| s.status);
+            match state {
+                Some(ContainerStateStatusEnum::RUNNING) => Ok(SubjectStatus::Running),
+                Some(ContainerStateStatusEnum::PAUSED) => Ok(SubjectStatus::Pending),
+                Some(ContainerStateStatusEnum::CREATED) => Ok(SubjectStatus::Pending),
+                Some(ContainerStateStatusEnum::RESTARTING) => Ok(SubjectStatus::Pending),
+                Some(ContainerStateStatusEnum::REMOVING) => Ok(SubjectStatus::Pending),
+                Some(ContainerStateStatusEnum::EXITED) => Ok(SubjectStatus::Terminated),
+                Some(ContainerStateStatusEnum::DEAD) => Ok(SubjectStatus::Terminated),
+                _ => Ok(SubjectStatus::Terminated),
+            }
+        })
     }
 
-    fn clock(&self) -> &Self::Clock {
+    fn clock(&self) -> &dyn ClockControl {
         &self.clock
     }
 
-    fn network(&self) -> &Self::Network {
+    fn network(&self) -> &dyn NetworkControl {
         &self.network
     }
 
-    fn storage(&self) -> &Self::Storage {
+    fn storage(&self) -> &dyn StorageControl {
         &self.storage
     }
 }
@@ -671,7 +754,7 @@ impl Docker {
     /// touch containers not labelled as dstest-managed.
     async fn remove_stale(&self, name: &str) -> Result<(), String> {
         let info = self
-            .connection
+            .connection()?
             .inspect_container(name, None::<InspectContainerOptions>)
             .await
             .map_err(|e| format!("Failed to inspect stale container {}: {}", name, e))?;
@@ -695,7 +778,7 @@ impl Docker {
             force: true,
             link: false,
         };
-        self.connection
+        self.connection()?
             .remove_container(name, Some(options))
             .await
             .map_err(|e| format!("Failed to remove stale container {}: {}", name, e))?;
@@ -849,7 +932,7 @@ impl Docker {
                     );
                 }
 
-                self.connection
+                self.connection()?
                     .update_container(&id, update_config)
                     .await
                     .map_err(|e| format!("Failed to throttle disk: {}", e))?;
@@ -861,7 +944,7 @@ impl Docker {
                     force: Some(true),
                 };
                 match self
-                    .connection
+                    .connection()?
                     .disconnect_network("bridge", disconnect)
                     .await
                 {
@@ -876,7 +959,7 @@ impl Docker {
             }
             crate::domain::fault::Tier::Memory => {
                 let container_info = self
-                    .connection
+                    .connection()?
                     .inspect_container(&id, None::<InspectContainerOptions>)
                     .await
                     .map_err(|e| format!("Failed to inspect container: {}", e))?;
@@ -904,7 +987,7 @@ impl Docker {
                     memory_swap: Some(new_limit),
                     ..Default::default()
                 };
-                self.connection
+                self.connection()?
                     .update_container(&id, update_config)
                     .await
                     .map_err(|e| format!("Failed to limit memory: {}", e))?;
@@ -916,7 +999,7 @@ impl Docker {
                     cpu_quota: Some(20000),
                     ..Default::default()
                 };
-                self.connection
+                self.connection()?
                     .update_container(&id, update_config)
                     .await
                     .map_err(|e| format!("Failed to throttle CPU: {}", e))?;
@@ -930,7 +1013,7 @@ impl Docker {
         let id = Self::container_id(subject).to_string();
 
         match self
-            .connection
+            .connection()?
             .inspect_container(&id, None::<InspectContainerOptions>)
             .await
         {
@@ -939,7 +1022,7 @@ impl Docker {
                     && state.status == Some(ContainerStateStatusEnum::EXITED)
                 {
                     info!("Restarting killed container id={}", id);
-                    self.connection
+                    self.connection()?
                         .restart_container(&id, None)
                         .await
                         .map_err(|e| format!("Failed to restart container: {}", e))?;
@@ -961,7 +1044,7 @@ impl Docker {
             endpoint_config: None,
         };
 
-        match self.connection.connect_network("bridge", connect).await {
+        match self.connection()?.connect_network("bridge", connect).await {
             Ok(_) => info!("Reconnected container to bridge network"),
             Err(e) => {
                 debug!(
@@ -1026,7 +1109,11 @@ impl Docker {
             ..Default::default()
         };
 
-        match self.connection.update_container(&id, update_config).await {
+        match self
+            .connection()?
+            .update_container(&id, update_config)
+            .await
+        {
             Ok(_) => debug!("Restored resource limits for container id={}", id),
             Err(BollardError::DockerResponseServerError {
                 status_code: 404, ..
@@ -1129,23 +1216,16 @@ mod tests {
         table.set("image", "alpine").unwrap();
         table.set("runtime", "dtrun").unwrap();
 
-        let docker = Docker {
-            connection: BollardDocker::connect_with_local_defaults().unwrap_or_else(|_| {
-                // Dummy client fallback for non-docker test environments
-                BollardDocker::connect_with_http_defaults().unwrap()
-            }),
-            original_limits: Mutex::new(HashMap::new()),
-            clock: DockerClock::new(BollardDocker::connect_with_http_defaults().unwrap()),
-            network: DockerNetwork::new(BollardDocker::connect_with_http_defaults().unwrap()),
-            storage: DockerStorage::new(),
-        };
+        let docker = Docker::new().unwrap();
 
         let parsed = docker.parse_subject(&table).unwrap();
-        assert_eq!(parsed.runtime.as_deref(), Some("dtrun"));
+        let data = parsed.downcast::<DockerSubjectData>().unwrap();
+        assert_eq!(data.runtime.as_deref(), Some("dtrun"));
 
         let table_default = lua.create_table().unwrap();
         table_default.set("image", "alpine").unwrap();
         let parsed_default = docker.parse_subject(&table_default).unwrap();
-        assert_eq!(parsed_default.runtime, None);
+        let data_default = parsed_default.downcast::<DockerSubjectData>().unwrap();
+        assert_eq!(data_default.runtime, None);
     }
 }

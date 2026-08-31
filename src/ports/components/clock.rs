@@ -6,6 +6,8 @@
 //! return "not supported" errors, so a substrate only overrides what it can
 //! actually virtualise.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::domain::subject::Subject;
@@ -28,45 +30,73 @@ pub struct ClockState {
 }
 
 /// Virtual clock control for a single subject. All methods are per-subject:
-/// different subjects may run on different clocks.
+/// different subjects may run on different clocks. Async methods return boxed
+/// pinned futures so the trait stays object-safe (`&dyn ClockControl`), since
+/// `Substrate::clock()` hands out trait objects.
 pub trait ClockControl: Send + Sync + 'static {
     /// Current time as seen by the subject, unix epoch millis. The default
     /// implementation reports real wall-clock time and never fails.
-    async fn now(&self, subject: &Subject) -> Result<i64, String> {
-        let _ = subject;
-        Ok(SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or(Duration::ZERO)
-            .as_millis() as i64)
+    fn now<'a>(
+        &'a self,
+        subject: &'a Subject,
+    ) -> Pin<Box<dyn Future<Output = Result<i64, String>> + Send + 'a>> {
+        Box::pin(async move {
+            let _ = subject;
+            Ok(SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or(Duration::ZERO)
+                .as_millis() as i64)
+        })
     }
 
     /// Set an absolute offset from real time.
-    async fn set_offset(&self, _subject: &Subject, _offset_ms: i64) -> Result<(), String> {
-        Err(NOT_SUPPORTED.to_string())
+    fn set_offset<'a>(
+        &'a self,
+        _subject: &'a Subject,
+        _offset_ms: i64,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async move { Err(NOT_SUPPORTED.to_string()) })
     }
 
     /// Advance the clock relative to its current position.
-    async fn advance(&self, _subject: &Subject, _delta_ms: i64) -> Result<(), String> {
-        Err(NOT_SUPPORTED.to_string())
+    fn advance<'a>(
+        &'a self,
+        _subject: &'a Subject,
+        _delta_ms: i64,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async move { Err(NOT_SUPPORTED.to_string()) })
     }
 
     /// Scale the rate at which virtual time passes (1.0 = real time).
-    async fn set_rate(&self, _subject: &Subject, _rate: f64) -> Result<(), String> {
-        Err(NOT_SUPPORTED.to_string())
+    fn set_rate<'a>(
+        &'a self,
+        _subject: &'a Subject,
+        _rate: f64,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async move { Err(NOT_SUPPORTED.to_string()) })
     }
 
     /// Freeze the clock at its current value.
-    async fn freeze(&self, _subject: &Subject) -> Result<(), String> {
-        Err(NOT_SUPPORTED.to_string())
+    fn freeze<'a>(
+        &'a self,
+        _subject: &'a Subject,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async move { Err(NOT_SUPPORTED.to_string()) })
     }
 
     /// Return the subject to real wall-clock time.
-    async fn release(&self, _subject: &Subject) -> Result<(), String> {
-        Err(NOT_SUPPORTED.to_string())
+    fn release<'a>(
+        &'a self,
+        _subject: &'a Subject,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async move { Err(NOT_SUPPORTED.to_string()) })
     }
 
     /// Inspect the subject's clock configuration.
-    async fn state(&self, _subject: &Subject) -> Result<ClockState, String> {
-        Err(NOT_SUPPORTED.to_string())
+    fn state<'a>(
+        &'a self,
+        _subject: &'a Subject,
+    ) -> Pin<Box<dyn Future<Output = Result<ClockState, String>> + Send + 'a>> {
+        Box::pin(async move { Err(NOT_SUPPORTED.to_string()) })
     }
 }

@@ -1,6 +1,5 @@
 use crate::adapters::lua::pg::pool::LuaPgPool;
 use crate::application::context::BindingContext;
-use crate::ports::Substrate;
 use mlua::{Lua, Result, Table, Value};
 use sqlx::postgres::{PgPoolOptions, PgRow};
 use sqlx::{Column, Row, TypeInfo};
@@ -49,7 +48,7 @@ fn pg_cell_to_lua_value(lua: &Lua, row: &PgRow, index: usize) -> Result<Value> {
     }
 }
 
-pub fn register<S: Substrate>(lua: &Lua, dstest: &Table, _ctx: &BindingContext<S>) -> Result<()> {
+pub fn register(lua: &Lua, dstest: &Table, _ctx: &BindingContext) -> Result<()> {
     let connect_fn = lua.create_async_function(
         |_, (conn_str, max_conns): (String, Option<u32>)| async move {
             info!("Connecting to PostgreSQL database: {}", conn_str);

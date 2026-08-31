@@ -5,6 +5,9 @@
 //! and asymmetric partitions. All impairment randomness must derive from the
 //! experiment seed so that a seed fully determines the network's behaviour.
 
+use std::future::Future;
+use std::pin::Pin;
+
 use crate::domain::subject::Subject;
 
 pub const NOT_SUPPORTED: &str = "network control not supported by this substrate";
@@ -75,44 +78,59 @@ pub trait NetworkControl: Send + Sync + 'static {
 
     /// Establish a controllable link from subject `a` to subject `b` on the
     /// given service port. Returns the link identifier.
-    async fn link(&self, _a: &Subject, _b: &Subject, _port: u16) -> Result<LinkId, String> {
-        Err(NOT_SUPPORTED.to_string())
+    fn link<'a>(
+        &'a self,
+        _a: &'a Subject,
+        _b: &'a Subject,
+        _port: u16,
+    ) -> Pin<Box<dyn Future<Output = Result<LinkId, String>> + Send + 'a>> {
+        Box::pin(async move { Err(NOT_SUPPORTED.to_string()) })
     }
 
     /// The address subject `a` should dial to reach `b` over this link
     /// (e.g. `"host.docker.internal:32768"`). Substrates without network
     /// control return an error.
-    async fn link_addr(&self, _link: &LinkId) -> Result<String, String> {
-        Err(NOT_SUPPORTED.to_string())
+    fn link_addr<'a>(
+        &'a self,
+        _link: &'a LinkId,
+    ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send + 'a>> {
+        Box::pin(async move { Err(NOT_SUPPORTED.to_string()) })
     }
 
     /// Impose constant delay plus uniform jitter on a link.
-    async fn set_latency(
-        &self,
-        _link: &LinkId,
+    fn set_latency<'a>(
+        &'a self,
+        _link: &'a LinkId,
         _delay_ms: u64,
         _jitter_ms: u64,
-    ) -> Result<(), String> {
-        Err(NOT_SUPPORTED.to_string())
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async move { Err(NOT_SUPPORTED.to_string()) })
     }
 
     /// Impose probabilistic traffic loss (0.0–1.0) on a link.
-    async fn set_loss(&self, _link: &LinkId, _pct: f64) -> Result<(), String> {
-        Err(NOT_SUPPORTED.to_string())
+    fn set_loss<'a>(
+        &'a self,
+        _link: &'a LinkId,
+        _pct: f64,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async move { Err(NOT_SUPPORTED.to_string()) })
     }
 
     /// Partition a link in the given direction.
-    async fn partition(
-        &self,
-        _link: &LinkId,
+    fn partition<'a>(
+        &'a self,
+        _link: &'a LinkId,
         _direction: Direction,
         _mode: PartitionMode,
-    ) -> Result<(), String> {
-        Err(NOT_SUPPORTED.to_string())
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async move { Err(NOT_SUPPORTED.to_string()) })
     }
 
     /// Remove all impairments from a link.
-    async fn heal(&self, _link: &LinkId) -> Result<(), String> {
-        Err(NOT_SUPPORTED.to_string())
+    fn heal<'a>(
+        &'a self,
+        _link: &'a LinkId,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async move { Err(NOT_SUPPORTED.to_string()) })
     }
 }

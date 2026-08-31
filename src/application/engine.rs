@@ -7,27 +7,29 @@
 
 use mlua::Lua;
 
+use std::sync::Arc;
+
 use crate::application::context::BindingContext;
 use crate::application::log::{BlastRadius, Metrics};
 use crate::application::usecases::teardown;
 use crate::domain::event::ExperimentEvent;
 use crate::domain::oracle::OracleReport;
-use crate::ports::Substrate;
+use crate::ports::SubstrateResolver;
 
-pub struct Engine<S: Substrate> {
-    ctx: BindingContext<S>,
+pub struct Engine {
+    ctx: BindingContext,
 }
 
-impl<S: Substrate> Engine<S> {
-    pub fn new(substrate: S) -> Self {
-        let ctx = BindingContext::new(substrate);
+impl Engine {
+    pub fn new(resolver: Arc<dyn SubstrateResolver>) -> Self {
+        let ctx = BindingContext::new(resolver);
         set_up_lua(&ctx);
         Engine { ctx }
     }
 
     /// The context, for the composition root to register Lua bindings and for
     /// tests to reach the application state.
-    pub fn context(&self) -> &BindingContext<S> {
+    pub fn context(&self) -> &BindingContext {
         &self.ctx
     }
 
@@ -54,7 +56,9 @@ impl<S: Substrate> Engine<S> {
     /// Tear down every live subject, awaiting each. Call this while a tokio
     /// runtime is still alive; `Drop` remains as a last-resort fallback.
     pub async fn shutdown(&self) {
-        teardown::teardown_all(&self.ctx.state, &self.ctx.substrate).await;
+        if let Ok(substrate) = self.ctx.substrate() {
+            teardown::teardown_all(&self.ctx.state, &substrate).await;
+        }
     }
 
     /// Final oracle report for the run (used for the process exit code).
@@ -87,7 +91,7 @@ impl<S: Substrate> Engine<S> {
 }
 
 /// Publish the `dstest` global table and a `print` helper into the Lua state.
-fn set_up_lua<S: Substrate>(ctx: &BindingContext<S>) {
+fn set_up_lua(ctx: &BindingContext) {
     let globals = ctx.lua.globals();
     let dstest = ctx
         .lua

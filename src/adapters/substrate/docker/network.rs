@@ -20,7 +20,9 @@
 //!   the same as `Direction::Both`.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use bollard::Docker as BollardDocker;
@@ -50,7 +52,7 @@ struct LinkInner {
 }
 
 pub struct DockerNetwork {
-    connection: BollardDocker,
+    connection: OnceLock<Result<BollardDocker, String>>,
     seed: Mutex<Option<u64>>,
     links: Mutex<HashMap<LinkId, LinkInner>>,
     link_counter: Mutex<usize>,
@@ -58,14 +60,23 @@ pub struct DockerNetwork {
 }
 
 impl DockerNetwork {
-    pub fn new(connection: BollardDocker) -> Self {
+    pub fn new() -> Self {
         Self {
-            connection,
+            connection: OnceLock::new(),
             seed: Mutex::new(None),
             links: Mutex::new(HashMap::new()),
             link_counter: Mutex::new(0),
             image_built: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Lazily connect to the Docker daemon on first use.
+    fn connection(&self) -> Result<&BollardDocker, String> {
+        let init = self.connection.get_or_init(|| {
+            BollardDocker::connect_with_local_defaults()
+                .map_err(|e| format!("Failed to connect to Docker: {}", e))
+        });
+        init.as_ref().map_err(|e| e.clone())
     }
 
     fn next_link_id(&self) -> LinkId {
@@ -80,8 +91,14 @@ impl DockerNetwork {
         // alone, so we cancel all links. They'll be recreated if needed.
         let mut links = self.links.lock().expect("poisoned links lock");
         for (_, inner) in links.drain() {
-            let conn = self.connection.clone();
             let name = inner.container_name.clone();
+            let conn = match self.connection() {
+                Ok(c) => c.clone(),
+                Err(e) => {
+                    warn!("unregister_subject: cannot connect to Docker: {}", e);
+                    continue;
+                }
+            };
             tokio::spawn(async move {
                 let opts = RemoveContainerOptions {
                     v: true,
@@ -103,7 +120,7 @@ impl DockerNetwork {
         }
 
         // Pull alpine if not already present.
-        self.connection
+        self.connection()?
             .create_image(
                 Some(bollard::query_parameters::CreateImageOptions {
                     from_image: Some(PROXY_IMAGE.to_string()),
@@ -124,7 +141,7 @@ impl DockerNetwork {
     async fn bridge_ip(&self, subject: &Subject) -> Result<String, String> {
         let id = subject.id.strip_prefix("docker/").unwrap_or(&subject.id);
         let info = self
-            .connection
+            .connection()?
             .inspect_container(id, None::<InspectContainerOptions>)
             .await
             .map_err(|e| format!("inspect failed for {}: {}", id, e))?;
@@ -148,13 +165,13 @@ impl DockerNetwork {
             ..Default::default()
         };
         let exec = self
-            .connection
+            .connection()?
             .create_exec(container_name, config)
             .await
             .map_err(|e| format!("create exec failed: {}", e))?;
 
         let result = self
-            .connection
+            .connection()?
             .start_exec(&exec.id, Some(bollard::exec::StartExecOptions::default()))
             .await
             .map_err(|e| format!("start exec failed: {}", e))?;
@@ -169,7 +186,7 @@ impl DockerNetwork {
         }
 
         let inspect = self
-            .connection
+            .connection()?
             .inspect_exec(&exec.id)
             .await
             .map_err(|e| format!("inspect exec failed: {}", e))?;
@@ -239,242 +256,272 @@ impl NetworkControl for DockerNetwork {
         }
     }
 
-    async fn link(&self, a: &Subject, b: &Subject, port: u16) -> Result<LinkId, String> {
-        self.ensure_image().await?;
+    fn link<'a>(
+        &'a self,
+        a: &'a Subject,
+        b: &'a Subject,
+        port: u16,
+    ) -> Pin<Box<dyn Future<Output = Result<LinkId, String>> + Send + 'a>> {
+        Box::pin(async move {
+            self.ensure_image().await?;
 
-        let target_ip = self.bridge_ip(b).await?;
-        let target = format!("{}:{}", target_ip, port);
+            let target_ip = self.bridge_ip(b).await?;
+            let target = format!("{}:{}", target_ip, port);
 
-        let id = self.next_link_id();
-        let container_name = format!("dstest-proxy-{}", id.0);
+            let id = self.next_link_id();
+            let container_name = format!("dstest-proxy-{}", id.0);
 
-        let cmd = vec![
-            "sh".to_string(),
-            "-c".to_string(),
-            format!(
-                "apk add --no-cache socat iproute2 iptables && exec socat TCP-LISTEN:{},fork,reuseaddr TCP:{}",
-                port, target
-            ),
-        ];
+            let cmd = vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                format!(
+                    "apk add --no-cache socat iproute2 iptables && exec socat TCP-LISTEN:{},fork,reuseaddr TCP:{}",
+                    port, target
+                ),
+            ];
 
-        let config = ContainerCreateBody {
-            image: Some(PROXY_IMAGE.to_string()),
-            cmd: Some(cmd),
-            host_config: Some(HostConfig {
-                cap_add: Some(vec!["NET_ADMIN".to_string()]),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-
-        let container = self
-            .connection
-            .create_container(
-                Some(CreateContainerOptions {
-                    name: Some(container_name.clone()),
+            let config = ContainerCreateBody {
+                image: Some(PROXY_IMAGE.to_string()),
+                cmd: Some(cmd),
+                host_config: Some(HostConfig {
+                    cap_add: Some(vec!["NET_ADMIN".to_string()]),
                     ..Default::default()
                 }),
-                config,
-            )
-            .await
-            .map_err(|e| format!("failed to create proxy container: {}", e))?;
+                ..Default::default()
+            };
 
-        self.connection
-            .start_container(&container.id, None::<StartContainerOptions>)
-            .await
-            .map_err(|e| format!("failed to start proxy container: {}", e))?;
+            let container = self
+                .connection()?
+                .create_container(
+                    Some(CreateContainerOptions {
+                        name: Some(container_name.clone()),
+                        ..Default::default()
+                    }),
+                    config,
+                )
+                .await
+                .map_err(|e| format!("failed to create proxy container: {}", e))?;
 
-        // Get the proxy container's bridge IP.
-        let info = self
-            .connection
-            .inspect_container(&container.id, None::<InspectContainerOptions>)
-            .await
-            .map_err(|e| format!("failed to inspect proxy container: {}", e))?;
+            self.connection()?
+                .start_container(&container.id, None::<StartContainerOptions>)
+                .await
+                .map_err(|e| format!("failed to start proxy container: {}", e))?;
 
-        let proxy_ip = info
-            .network_settings
-            .and_then(|n| n.networks)
-            .and_then(|networks| {
-                networks
-                    .values()
-                    .next()
-                    .and_then(|ep| ep.ip_address.clone())
-            })
-            .ok_or_else(|| "proxy container has no bridge IP".to_string())?;
+            // Get the proxy container's bridge IP.
+            let info = self
+                .connection()?
+                .inspect_container(&container.id, None::<InspectContainerOptions>)
+                .await
+                .map_err(|e| format!("failed to inspect proxy container: {}", e))?;
 
-        let addr = format!("{}:{}", proxy_ip, port);
-        info!(
-            "network link {} created: {} -> {} via {}",
-            id.0, a.id, target, addr
-        );
+            let proxy_ip = info
+                .network_settings
+                .and_then(|n| n.networks)
+                .and_then(|networks| {
+                    networks
+                        .values()
+                        .next()
+                        .and_then(|ep| ep.ip_address.clone())
+                })
+                .ok_or_else(|| "proxy container has no bridge IP".to_string())?;
 
-        // Wait for socat to be ready (it installs packages on startup). Bound
-        // each connection attempt so an unreachable proxy bridge IP (e.g. on a
-        // podman/docker machine VM where the host can't dial container IPs)
-        // cannot hang the whole experiment.
-        let ready_addr = format!("{}:{}", proxy_ip, port);
-        for attempt in 0..10 {
-            let connected = tokio::time::timeout(
-                Duration::from_millis(500),
-                tokio::net::TcpStream::connect(&ready_addr),
-            )
-            .await
-            .is_ok_and(|r| r.is_ok());
-            if connected {
-                debug!("proxy ready after {} attempts", attempt + 1);
-                break;
+            let addr = format!("{}:{}", proxy_ip, port);
+            info!(
+                "network link {} created: {} -> {} via {}",
+                id.0, a.id, target, addr
+            );
+
+            // Wait for socat to be ready (it installs packages on startup). Bound
+            // each connection attempt so an unreachable proxy bridge IP (e.g. on a
+            // podman/docker machine VM where the host can't dial container IPs)
+            // cannot hang the whole experiment.
+            let ready_addr = format!("{}:{}", proxy_ip, port);
+            for attempt in 0..10 {
+                let connected = tokio::time::timeout(
+                    Duration::from_millis(500),
+                    tokio::net::TcpStream::connect(&ready_addr),
+                )
+                .await
+                .is_ok_and(|r| r.is_ok());
+                if connected {
+                    debug!("proxy ready after {} attempts", attempt + 1);
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(500)).await;
             }
-            tokio::time::sleep(Duration::from_millis(500)).await;
-        }
 
-        self.links.lock().expect("poisoned links lock").insert(
-            id.clone(),
-            LinkInner {
-                container_name,
-                addr,
-                delay_ms: None,
-                jitter_ms: None,
-                loss_pct: None,
-            },
-        );
+            self.links.lock().expect("poisoned links lock").insert(
+                id.clone(),
+                LinkInner {
+                    container_name,
+                    addr,
+                    delay_ms: None,
+                    jitter_ms: None,
+                    loss_pct: None,
+                },
+            );
 
-        Ok(id)
+            Ok(id)
+        })
     }
 
-    async fn link_addr(&self, link: &LinkId) -> Result<String, String> {
-        let links = self.links.lock().expect("poisoned links lock");
-        let inner = links
-            .get(link)
-            .ok_or_else(|| format!("unknown link {}", link.0))?;
-        Ok(inner.addr.clone())
+    fn link_addr<'a>(
+        &'a self,
+        link: &'a LinkId,
+    ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send + 'a>> {
+        Box::pin(async move {
+            let links = self.links.lock().expect("poisoned links lock");
+            let inner = links
+                .get(link)
+                .ok_or_else(|| format!("unknown link {}", link.0))?;
+            Ok(inner.addr.clone())
+        })
     }
 
-    async fn set_latency(
-        &self,
-        link: &LinkId,
+    fn set_latency<'a>(
+        &'a self,
+        link: &'a LinkId,
         delay_ms: u64,
         jitter_ms: u64,
-    ) -> Result<(), String> {
-        {
-            let mut links = self.links.lock().expect("poisoned links lock");
-            let inner = links
-                .get_mut(link)
-                .ok_or_else(|| format!("unknown link {}", link.0))?;
-            inner.delay_ms = Some(delay_ms);
-            inner.jitter_ms = if jitter_ms > 0 { Some(jitter_ms) } else { None };
-        }
-        self.apply_netem(link).await
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async move {
+            {
+                let mut links = self.links.lock().expect("poisoned links lock");
+                let inner = links
+                    .get_mut(link)
+                    .ok_or_else(|| format!("unknown link {}", link.0))?;
+                inner.delay_ms = Some(delay_ms);
+                inner.jitter_ms = if jitter_ms > 0 { Some(jitter_ms) } else { None };
+            }
+            self.apply_netem(link).await
+        })
     }
 
-    async fn set_loss(&self, link: &LinkId, pct: f64) -> Result<(), String> {
-        if !(0.0..=1.0).contains(&pct) {
-            return Err(format!("loss must be 0.0–1.0, got {}", pct));
-        }
-        {
-            let mut links = self.links.lock().expect("poisoned links lock");
-            let inner = links
-                .get_mut(link)
-                .ok_or_else(|| format!("unknown link {}", link.0))?;
-            inner.loss_pct = Some(pct);
-        }
-        self.apply_netem(link).await
+    fn set_loss<'a>(
+        &'a self,
+        link: &'a LinkId,
+        pct: f64,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async move {
+            if !(0.0..=1.0).contains(&pct) {
+                return Err(format!("loss must be 0.0–1.0, got {}", pct));
+            }
+            {
+                let mut links = self.links.lock().expect("poisoned links lock");
+                let inner = links
+                    .get_mut(link)
+                    .ok_or_else(|| format!("unknown link {}", link.0))?;
+                inner.loss_pct = Some(pct);
+            }
+            self.apply_netem(link).await
+        })
     }
 
-    async fn partition(
-        &self,
-        link: &LinkId,
+    fn partition<'a>(
+        &'a self,
+        link: &'a LinkId,
         _direction: Direction,
         mode: PartitionMode,
-    ) -> Result<(), String> {
-        let container_name = {
-            let links = self.links.lock().expect("poisoned links lock");
-            links
-                .get(link)
-                .ok_or_else(|| format!("unknown link {}", link.0))?
-                .container_name
-                .clone()
-        };
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async move {
+            let container_name = {
+                let links = self.links.lock().expect("poisoned links lock");
+                links
+                    .get(link)
+                    .ok_or_else(|| format!("unknown link {}", link.0))?
+                    .container_name
+                    .clone()
+            };
 
-        match mode {
-            PartitionMode::Blackhole => {
-                // Drop all outbound traffic (peers see timeouts).
-                self.exec_in_proxy(&container_name, &["iptables", "-A", "OUTPUT", "-j", "DROP"])
+            match mode {
+                PartitionMode::Blackhole => {
+                    // Drop all outbound traffic (peers see timeouts).
+                    self.exec_in_proxy(
+                        &container_name,
+                        &["iptables", "-A", "OUTPUT", "-j", "DROP"],
+                    )
                     .await?;
+                }
+                PartitionMode::Reset => {
+                    // Reject all outbound TCP with RST.
+                    self.exec_in_proxy(
+                        &container_name,
+                        &[
+                            "iptables",
+                            "-A",
+                            "OUTPUT",
+                            "-p",
+                            "tcp",
+                            "-j",
+                            "REJECT",
+                            "--reject-with",
+                            "tcp-reset",
+                        ],
+                    )
+                    .await?;
+                }
             }
-            PartitionMode::Reset => {
-                // Reject all outbound TCP with RST.
-                self.exec_in_proxy(
-                    &container_name,
-                    &[
-                        "iptables",
-                        "-A",
-                        "OUTPUT",
-                        "-p",
-                        "tcp",
-                        "-j",
-                        "REJECT",
-                        "--reject-with",
-                        "tcp-reset",
-                    ],
-                )
-                .await?;
-            }
-        }
-        info!("link {} partitioned: {:?}", link.0, mode);
-        Ok(())
+            info!("link {} partitioned: {:?}", link.0, mode);
+            Ok(())
+        })
     }
 
-    async fn heal(&self, link: &LinkId) -> Result<(), String> {
-        let container_name = {
-            let links = self.links.lock().expect("poisoned links lock");
-            links
-                .get(link)
-                .ok_or_else(|| format!("unknown link {}", link.0))?
-                .container_name
-                .clone()
-        };
+    fn heal<'a>(
+        &'a self,
+        link: &'a LinkId,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async move {
+            let container_name = {
+                let links = self.links.lock().expect("poisoned links lock");
+                links
+                    .get(link)
+                    .ok_or_else(|| format!("unknown link {}", link.0))?
+                    .container_name
+                    .clone()
+            };
 
-        // Remove iptables OUTPUT DROP (blackhole) — errors if absent.
-        self.exec_in_proxy(&container_name, &["iptables", "-D", "OUTPUT", "-j", "DROP"])
+            // Remove iptables OUTPUT DROP (blackhole) — errors if absent.
+            self.exec_in_proxy(&container_name, &["iptables", "-D", "OUTPUT", "-j", "DROP"])
+                .await
+                .ok();
+
+            // Remove iptables OUTPUT tcp-reset (reset partition) — errors if absent.
+            self.exec_in_proxy(
+                &container_name,
+                &[
+                    "iptables",
+                    "-D",
+                    "OUTPUT",
+                    "-p",
+                    "tcp",
+                    "-j",
+                    "REJECT",
+                    "--reject-with",
+                    "tcp-reset",
+                ],
+            )
             .await
             .ok();
 
-        // Remove iptables OUTPUT tcp-reset (reset partition) — errors if absent.
-        self.exec_in_proxy(
-            &container_name,
-            &[
-                "iptables",
-                "-D",
-                "OUTPUT",
-                "-p",
-                "tcp",
-                "-j",
-                "REJECT",
-                "--reject-with",
-                "tcp-reset",
-            ],
-        )
-        .await
-        .ok();
+            // Remove tc qdisc (latency/loss) — errors if absent.
+            self.exec_in_proxy(
+                &container_name,
+                &["tc", "qdisc", "del", "dev", "eth0", "root"],
+            )
+            .await
+            .ok();
 
-        // Remove tc qdisc (latency/loss) — errors if absent.
-        self.exec_in_proxy(
-            &container_name,
-            &["tc", "qdisc", "del", "dev", "eth0", "root"],
-        )
-        .await
-        .ok();
-
-        {
-            let mut links = self.links.lock().expect("poisoned links lock");
-            if let Some(inner) = links.get_mut(link) {
-                inner.delay_ms = None;
-                inner.jitter_ms = None;
-                inner.loss_pct = None;
+            {
+                let mut links = self.links.lock().expect("poisoned links lock");
+                if let Some(inner) = links.get_mut(link) {
+                    inner.delay_ms = None;
+                    inner.jitter_ms = None;
+                    inner.loss_pct = None;
+                }
             }
-        }
 
-        info!("link {} healed", link.0);
-        Ok(())
+            info!("link {} healed", link.0);
+            Ok(())
+        })
     }
 }

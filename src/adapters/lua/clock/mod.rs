@@ -4,27 +4,26 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use mlua::{Lua, Result, Table, UserData, UserDataMethods};
 
 use crate::adapters::lua::LuaModule;
-use crate::application::context::BindingContext;
+use crate::application::context::{BindingContext, locked_substrate};
 use crate::domain::subject::Subject;
 use crate::ports::Substrate;
-use crate::ports::components::ClockControl;
 
 /// Handle to a subject's virtual clock, obtained via
 /// `dstest.clock.virtual(subject_id)`. All methods dispatch through the
 /// substrate's `ClockControl` implementation; substrates without virtual
 /// clock support return "not supported" errors.
-struct VirtualClock<S: Substrate> {
-    substrate: Arc<S>,
+struct VirtualClock {
+    substrate: Arc<dyn Substrate>,
     subject_id: String,
 }
 
-impl<S: Substrate> VirtualClock<S> {
+impl VirtualClock {
     fn subject(&self) -> Subject {
         Subject::new(self.subject_id.clone())
     }
 }
 
-impl<S: Substrate> UserData for VirtualClock<S> {
+impl UserData for VirtualClock {
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
         methods.add_async_method("now", |lua, this, ()| async move {
             let millis = this
@@ -101,8 +100,8 @@ impl<S: Substrate> UserData for VirtualClock<S> {
 
 pub struct Clock;
 
-impl<S: Substrate> LuaModule<S> for Clock {
-    fn register(lua: &Lua, dstest: &Table, ctx: &BindingContext<S>) -> Result<()> {
+impl LuaModule for Clock {
+    fn register(lua: &Lua, dstest: &Table, ctx: &BindingContext) -> Result<()> {
         let clock_table = lua.create_table()?;
 
         // dstest.clock() — real wall-clock time (the harness clock).
@@ -122,10 +121,11 @@ impl<S: Substrate> LuaModule<S> for Clock {
         clock_table.set("now", now_fn)?;
 
         // dstest.clock.virtual(subject_id) -> per-subject virtual clock handle.
-        let substrate = Arc::clone(&ctx.substrate);
+        let substrate_slot = Arc::clone(&ctx.substrate);
         let virtual_fn = lua.create_function(move |lua, subject_id: String| {
+            let substrate = locked_substrate(&substrate_slot)?;
             lua.create_userdata(VirtualClock {
-                substrate: Arc::clone(&substrate),
+                substrate,
                 subject_id,
             })
         })?;

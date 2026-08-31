@@ -2,12 +2,11 @@ use mlua::{Lua, Result, Table};
 
 use crate::adapters::lua::LuaModule;
 use crate::application::context::BindingContext;
-use crate::ports::Substrate;
 
 pub struct Log;
 
-impl<S: Substrate> LuaModule<S> for Log {
-    fn register(lua: &Lua, dstest: &Table, _: &BindingContext<S>) -> Result<()> {
+impl LuaModule for Log {
+    fn register(lua: &Lua, dstest: &Table, _: &BindingContext) -> Result<()> {
         let debug_fn = lua.create_function(|_, msg: String| {
             tracing::debug!("{}", msg);
             Ok(())

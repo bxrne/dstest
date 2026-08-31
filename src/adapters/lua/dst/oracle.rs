@@ -5,7 +5,6 @@ use mlua::{Function, Lua, Result, Table, Value};
 use crate::application::context::BindingContext;
 use crate::application::oracle::{InvariantFn, PredicateFn};
 use crate::domain::oracle::OracleReport;
-use crate::ports::Substrate;
 
 /// Render an oracle report into a Lua table (the `oracle` result).
 fn report_to_table(lua: &Lua, report: &OracleReport) -> Result<Table> {
@@ -37,7 +36,7 @@ fn report_to_table(lua: &Lua, report: &OracleReport) -> Result<Table> {
     Ok(t)
 }
 
-pub fn register<S: Substrate>(lua: &Lua, dstest: &Table, ctx: &BindingContext<S>) -> Result<()> {
+pub fn register(lua: &Lua, dstest: &Table, ctx: &BindingContext) -> Result<()> {
     let oracle = Arc::clone(&ctx.oracle);
     let oracle_table = lua.create_table()?;
 

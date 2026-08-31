@@ -5,14 +5,10 @@ use mlua::{Lua, Result, Table};
 
 use crate::application::context::BindingContext;
 use crate::application::state::AppState;
-use crate::ports::Substrate;
 
 /// Resolve a subject id to its reachable address plus the HTTP settings of
 /// the config it was created under.
-pub fn resolve_subject_http(
-    state: &AppState,
-    id: &str,
-) -> mlua::Result<(String, u64, u32, u64)> {
+pub fn resolve_subject_http(state: &AppState, id: &str) -> mlua::Result<(String, u64, u32, u64)> {
     let host = state
         .subjects
         .host_for(id)
@@ -33,7 +29,7 @@ pub fn resolve_subject_http(
     ))
 }
 
-pub fn register<S: Substrate>(lua: &Lua, dstest: &Table, ctx: &BindingContext<S>) -> Result<()> {
+pub fn register(lua: &Lua, dstest: &Table, ctx: &BindingContext) -> Result<()> {
     let state = Arc::clone(&ctx.state);
 
     let http_fn =

@@ -2,11 +2,10 @@ use std::sync::Arc;
 
 use mlua::{Lua, Result, Table, Value};
 
-use crate::application::context::BindingContext;
+use crate::application::context::{BindingContext, locked_substrate};
 use crate::domain::subject::Subject;
-use crate::ports::{Substrate, ToLua};
 
-pub fn register<S: Substrate>(lua: &Lua, dstest: &Table, ctx: &BindingContext<S>) -> Result<()> {
+pub fn register(lua: &Lua, dstest: &Table, ctx: &BindingContext) -> Result<()> {
     let substrate = Arc::clone(&ctx.substrate);
     let state = Arc::clone(&ctx.state);
 
@@ -15,6 +14,7 @@ pub fn register<S: Substrate>(lua: &Lua, dstest: &Table, ctx: &BindingContext<S>
         let state = Arc::clone(&state);
 
         async move {
+            let substrate = locked_substrate(&substrate)?;
             let subject = Subject::new(id.clone());
 
             let info = substrate

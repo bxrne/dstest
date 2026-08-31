@@ -18,9 +18,9 @@ const DEP_WAIT_ATTEMPTS: usize = 120;
 const DEP_WAIT_INTERVAL: Duration = Duration::from_millis(500);
 
 /// Host a subject for a config handle. Returns the subject id.
-pub async fn setup<S: Substrate>(
+pub async fn setup(
     state: &Arc<Mutex<AppState>>,
-    substrate: &Arc<S>,
+    substrate: &Arc<dyn Substrate>,
     handle: String,
     config_tbl: Table,
 ) -> mlua::Result<String> {
@@ -33,12 +33,12 @@ pub async fn setup<S: Substrate>(
             ))
         })?;
 
-        if cfg.substrate.as_deref() != Some(S::NAME) {
+        if cfg.substrate.as_deref() != Some(substrate.name()) {
             return Err(mlua::Error::RuntimeError(format!(
-                "substrate mismatch: config '{}' wants \"{}\" but the engine was built for \"{}\"",
+                "substrate mismatch: config '{}' wants \"{}\" but the engine resolved \"{}\"",
                 handle,
                 cfg.substrate.as_deref().unwrap_or("<none>"),
-                S::NAME
+                substrate.name()
             )));
         }
 
@@ -86,11 +86,11 @@ pub async fn setup<S: Substrate>(
         .map_err(mlua::Error::RuntimeError)?;
 
     let hosted = substrate
-        .host(&name, &data)
+        .host(&name, &*data)
         .await
         .map_err(mlua::Error::RuntimeError)?;
 
-    let subject_id = format!("{}/{}", S::NAME, hosted.id);
+    let subject_id = format!("{}/{}", substrate.name(), hosted.id);
 
     {
         let mut s = state.lock().expect("poisoned engine state lock");

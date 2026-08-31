@@ -1,8 +1,11 @@
 //! dstest — distributed systems fault testing harness. Composition root.
 //!
-//! This module is the only place that knows every layer: it selects the
-//! Docker substrate adapter, builds the application engine, registers the
-//! Lua bindings against it, and drives the script from stdin.
+//! This module is the only place that knows every layer: it registers the
+//! substrate factories available for runtime dispatch, builds the
+//! application engine, wires the Lua bindings against it, and drives the
+//! script from stdin. The script declares its substrate in
+//! `dstest.config({ substrate = ... })`; the engine resolves it lazily, so
+//! no substrate (or its backend) is built before the script says so.
 
 mod adapters;
 mod application;
@@ -10,6 +13,8 @@ mod domain;
 mod ports;
 
 use std::io::{Read, stdin};
+use std::sync::Arc;
+
 use tracing::{debug, error, info};
 
 fn main() {
@@ -17,12 +22,15 @@ fn main() {
 
     debug!("Starting dstest");
 
-    let docker = adapters::substrate::docker::Docker::new().unwrap_or_else(|e| {
-        error!("Failed to connect to Docker daemon: {e}");
-        std::process::exit(3);
-    });
+    // Register every concrete substrate for runtime dispatch by the script's
+    // declared `substrate` field. Building a substrate (e.g. Docker) does not
+    // connect to its backend; the connection is deferred until first use.
+    let resolver: Arc<dyn ports::SubstrateResolver> = Arc::new(
+        adapters::substrate::SubstrateRegistry::new()
+            .register(adapters::substrate::docker::Docker::factory()),
+    );
 
-    let engine = application::Engine::new(docker);
+    let engine = application::Engine::new(resolver);
 
     // Wire the Lua bindings onto the engine (composition root; the engine
     // itself knows nothing about concrete adapters).

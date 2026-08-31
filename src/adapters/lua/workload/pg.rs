@@ -9,9 +9,8 @@ use mlua::{Lua, Result, Table};
 
 use crate::adapters::lua::pg::pool::LuaPgPool;
 use crate::application::context::BindingContext;
-use crate::ports::Substrate;
 
-pub fn register<S: Substrate>(lua: &Lua, workload: &Table, _ctx: &BindingContext<S>) -> Result<()> {
+pub fn register(lua: &Lua, workload: &Table, _ctx: &BindingContext) -> Result<()> {
     let run_fn = lua.create_async_function(
         move |lua, (wrapped_pool, opts): (LuaPgPool, Table)| async move {
             let duration_secs: u64 = opts.get("duration_secs").unwrap_or(10);

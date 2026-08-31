@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use mlua::Lua;
 
-use crate::application::oracle::{run_checks, CheckRunner};
+use crate::application::oracle::{CheckRunner, run_checks};
 use crate::application::state::AppState;
 use crate::domain::config::AccumulationMode;
 use crate::domain::event::ExperimentEvent;
@@ -32,11 +32,11 @@ pub struct StepOutcome {
 
 /// Execute a single fault step. Returns `None` when the config's fault
 /// schedule is exhausted.
-pub async fn run_step<S: Substrate>(
+pub async fn run_step(
     lua: &Lua,
     state: &Arc<Mutex<AppState>>,
     oracle: &Arc<Mutex<CheckRunner>>,
-    substrate: &Arc<S>,
+    substrate: &Arc<dyn Substrate>,
     cfg_arg: Option<String>,
 ) -> mlua::Result<Option<StepOutcome>> {
     // Resolve the config handle and clone the config out.
@@ -112,20 +112,23 @@ pub async fn run_step<S: Substrate>(
     let fault_str = step_result.fault.to_string();
     {
         let mut s = state.lock().expect("poisoned engine state lock");
-        s.subjects.push_fault(&step_result.subject_id, step_result.fault);
+        s.subjects
+            .push_fault(&step_result.subject_id, step_result.fault);
         s.subjects.mark_faulted(&step_result.subject_id);
         s.log.push(ExperimentEvent::FaultApplied {
             fault: step_result.fault,
         });
 
         // State enumeration: each fault round visits a distinct engine state.
-        s.log.push(ExperimentEvent::StateEnumerated { unique: true });
+        s.log
+            .push(ExperimentEvent::StateEnumerated { unique: true });
 
         // Interleaving enumeration: a config hosting several subjects offers
         // multiple schedules, so each round on one is a distinct interleaving.
         let subject_count = s.subjects.ids_for_config(&handle).len();
         if subject_count > 1 {
-            s.log.push(ExperimentEvent::InterleavingEnumerated { unique: true });
+            s.log
+                .push(ExperimentEvent::InterleavingEnumerated { unique: true });
         }
 
         // Blast radius: nodes of the config currently under fault.

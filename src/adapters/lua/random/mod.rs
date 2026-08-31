@@ -12,12 +12,11 @@ use rand::Rng;
 
 use crate::adapters::lua::LuaModule;
 use crate::application::context::BindingContext;
-use crate::ports::Substrate;
 
 pub struct Random;
 
-impl<S: Substrate> LuaModule<S> for Random {
-    fn register(lua: &Lua, dstest: &Table, ctx: &BindingContext<S>) -> Result<()> {
+impl LuaModule for Random {
+    fn register(lua: &Lua, dstest: &Table, ctx: &BindingContext) -> Result<()> {
         let rng = Arc::clone(&ctx.workload_rng);
 
         let random_table = lua.create_table()?;

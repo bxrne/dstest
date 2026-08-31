@@ -22,9 +22,11 @@
 
 use std::collections::HashMap;
 use std::fs;
+use std::future::Future;
 use std::io::Read;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::pin::Pin;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bollard::Docker as BollardDocker;
@@ -113,17 +115,26 @@ pub struct ClockPrep {
 }
 
 pub struct DockerClock {
-    connection: BollardDocker,
+    connection: OnceLock<Result<BollardDocker, String>>,
     /// container id -> control file path on the host
     clocks: Mutex<HashMap<String, PathBuf>>,
 }
 
 impl DockerClock {
-    pub fn new(connection: BollardDocker) -> Self {
+    pub fn new() -> Self {
         Self {
-            connection,
+            connection: OnceLock::new(),
             clocks: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Lazily connect to the Docker daemon on first use.
+    fn connection(&self) -> Result<&BollardDocker, String> {
+        let init = self.connection.get_or_init(|| {
+            BollardDocker::connect_with_local_defaults()
+                .map_err(|e| format!("Failed to connect to Docker: {}", e))
+        });
+        init.as_ref().map_err(|e| e.clone())
     }
 
     /// Host directory holding the compiled shim and per-subject control files.
@@ -238,7 +249,7 @@ impl DockerClock {
         fs::write(&c_path, CLOCK_SHIM_C).map_err(|e| format!("failed to write clock.c: {}", e))?;
 
         info!("virtual clock: compiling clock shim (one-time setup)");
-        let conn = &self.connection;
+        let conn = self.connection()?;
 
         // CentOS 7 (glibc 2.17): the .so loads into any newer-glibc subject.
         super::Docker::pull_image(conn, "centos:7").await?;
@@ -309,51 +320,88 @@ impl DockerClock {
 }
 
 impl ClockControl for DockerClock {
-    async fn now(&self, subject: &Subject) -> Result<i64, String> {
-        Ok(self.read_nanos(subject)? / 1_000_000)
+    fn now<'a>(
+        &'a self,
+        subject: &'a Subject,
+    ) -> Pin<Box<dyn Future<Output = Result<i64, String>> + Send + 'a>> {
+        Box::pin(async move { Ok(self.read_nanos(subject)? / 1_000_000) })
     }
 
-    async fn set_offset(&self, subject: &Subject, offset_ms: i64) -> Result<(), String> {
-        let real_now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or(Duration::ZERO)
-            .as_nanos() as i64;
-        self.write_nanos(subject, real_now + offset_ms * 1_000_000)
+    fn set_offset<'a>(
+        &'a self,
+        subject: &'a Subject,
+        offset_ms: i64,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async move {
+            let real_now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or(Duration::ZERO)
+                .as_nanos() as i64;
+            self.write_nanos(subject, real_now + offset_ms * 1_000_000)
+        })
     }
 
-    async fn advance(&self, subject: &Subject, delta_ms: i64) -> Result<(), String> {
-        let current = self.read_nanos(subject)?;
-        self.write_nanos(subject, current + delta_ms * 1_000_000)
+    fn advance<'a>(
+        &'a self,
+        subject: &'a Subject,
+        delta_ms: i64,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async move {
+            let current = self.read_nanos(subject)?;
+            self.write_nanos(subject, current + delta_ms * 1_000_000)
+        })
     }
 
-    async fn set_rate(&self, _subject: &Subject, _rate: f64) -> Result<(), String> {
-        Err(
-            "set_rate is not supported by the manual clock: time only moves when advanced"
-                .to_string(),
-        )
+    fn set_rate<'a>(
+        &'a self,
+        _subject: &'a Subject,
+        _rate: f64,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async move {
+            Err(
+                "set_rate is not supported by the manual clock: time only moves when advanced"
+                    .to_string(),
+            )
+        })
     }
 
-    async fn freeze(&self, _subject: &Subject) -> Result<(), String> {
+    fn freeze<'a>(
+        &'a self,
+        _subject: &'a Subject,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
         // The manual clock is frozen by construction.
-        Ok(())
+        Box::pin(async move { Ok(()) })
     }
 
-    async fn release(&self, _subject: &Subject) -> Result<(), String> {
-        Err("release is not supported: a virtual-clock subject must be recreated to regain real time".to_string())
+    fn release<'a>(
+        &'a self,
+        _subject: &'a Subject,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async move {
+            Err(
+                "release is not supported: a virtual-clock subject must be recreated to regain real time"
+                    .to_string(),
+            )
+        })
     }
 
-    async fn state(&self, subject: &Subject) -> Result<ClockState, String> {
-        let nanos = self.read_nanos(subject)?;
-        let real_now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or(Duration::ZERO)
-            .as_nanos() as i64;
-        Ok(ClockState {
-            virtualised: true,
-            epoch_millis: nanos / 1_000_000,
-            offset_millis: (nanos - real_now) / 1_000_000,
-            rate: 1.0,
-            frozen: true,
+    fn state<'a>(
+        &'a self,
+        subject: &'a Subject,
+    ) -> Pin<Box<dyn Future<Output = Result<ClockState, String>> + Send + 'a>> {
+        Box::pin(async move {
+            let nanos = self.read_nanos(subject)?;
+            let real_now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or(Duration::ZERO)
+                .as_nanos() as i64;
+            Ok(ClockState {
+                virtualised: true,
+                epoch_millis: nanos / 1_000_000,
+                offset_millis: (nanos - real_now) / 1_000_000,
+                rate: 1.0,
+                frozen: true,
+            })
         })
     }
 }

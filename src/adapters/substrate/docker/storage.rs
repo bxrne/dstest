@@ -21,8 +21,10 @@
 
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
+use std::future::Future;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::process::Command;
 use std::sync::Mutex;
 
@@ -338,169 +340,210 @@ impl StorageControl for DockerStorage {
         }
     }
 
-    async fn attach(&self, _subject: &Subject, _opts: StorageOpts) -> Result<(), String> {
-        Err(
-            "storage must be configured at setup time via setup({ storage = { flaky = true, mount = \"/data\", size_mb = 512 } })"
-                .to_string(),
-        )
+    fn attach<'a>(
+        &'a self,
+        _subject: &'a Subject,
+        _opts: StorageOpts,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async move {
+            Err(
+                "storage must be configured at setup time via setup({ storage = { flaky = true, mount = \"/data\", size_mb = 512 } })"
+                    .to_string(),
+            )
+        })
     }
 
-    async fn error(&self, subject: &Subject, on: bool) -> Result<(), String> {
-        let state = self.state_for(subject)?;
-        if on {
-            // Constant EIO for all I/O.
-            let table = format!("0 {} error", state.sectors);
-            self.reload_table(&state, &table)?;
-            debug!("storage: error mode ON for {}", state.dm_name);
-        } else {
-            let table = Self::pass_through_table(state.sectors, &state.loop_dev);
-            self.reload_table(&state, &table)?;
-            debug!("storage: error mode OFF for {}", state.dm_name);
-        }
-        Ok(())
-    }
-
-    async fn drop_writes(&self, subject: &Subject, on: bool) -> Result<(), String> {
-        let state = self.state_for(subject)?;
-        let table = if on {
-            // Always-down + drop_writes: writes ACK but never hit the backing store.
-            Self::down_table(state.sectors, &state.loop_dev, &["drop_writes"])
-        } else {
-            Self::pass_through_table(state.sectors, &state.loop_dev)
-        };
-        self.reload_table(&state, &table)?;
-        debug!("storage: drop_writes={} for {}", on, state.dm_name);
-        Ok(())
-    }
-
-    async fn slow(&self, _subject: &Subject, _delay_ms: u64) -> Result<(), String> {
-        Err(
-            "slow is not supported on dm-flakey (use deprive:disk for coarse I/O throttling)"
-                .to_string(),
-        )
-    }
-
-    async fn corrupt(&self, subject: &Subject, n: u64) -> Result<(), String> {
-        let state = self.state_for(subject)?;
-        let seed = self.seed.lock().expect("poisoned seed lock").unwrap_or(0);
-        let counter = {
-            let mut c = self.corrupt_counter.lock().expect("poisoned counter lock");
-            let v = *c;
-            *c = c.wrapping_add(1);
-            v
-        };
-        // Mix subject id + counter so concurrent subjects and successive calls
-        // draw independent streams from the same experiment seed.
-        let mixed = seed
-            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
-            .wrapping_add(counter)
-            .wrapping_add(state.dm_name.len() as u64);
-        let mut rng = StdRng::seed_from_u64(mixed);
-
-        run_cmd("dmsetup", &["suspend", &state.dm_name])
-            .map_err(|e| format!("dmsetup suspend failed: {}", e))?;
-
-        let corrupt_result = (|| -> Result<(), String> {
-            let file_size = fs::metadata(&state.backing_file)
-                .map_err(|e| format!("failed to stat backing file: {}", e))?
-                .len();
-            if file_size == 0 {
-                return Err("backing file is empty".to_string());
+    fn error<'a>(
+        &'a self,
+        subject: &'a Subject,
+        on: bool,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async move {
+            let state = self.state_for(subject)?;
+            if on {
+                // Constant EIO for all I/O.
+                let table = format!("0 {} error", state.sectors);
+                self.reload_table(&state, &table)?;
+                debug!("storage: error mode ON for {}", state.dm_name);
+            } else {
+                let table = Self::pass_through_table(state.sectors, &state.loop_dev);
+                self.reload_table(&state, &table)?;
+                debug!("storage: error mode OFF for {}", state.dm_name);
             }
-            let mut file = OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(&state.backing_file)
-                .map_err(|e| format!("failed to open backing file: {}", e))?;
-            for _ in 0..n {
-                let offset = rng.gen_range(0..file_size);
-                file.seek(SeekFrom::Start(offset))
-                    .map_err(|e| format!("seek failed: {}", e))?;
-                let mut buf = [0u8; 1];
-                // Sparse holes read as zeros; still flip them so the file is dirtied.
-                let _ = file.read_exact(&mut buf);
-                file.seek(SeekFrom::Start(offset))
-                    .map_err(|e| format!("seek failed: {}", e))?;
-                buf[0] ^= 0xff;
-                file.write_all(&buf)
-                    .map_err(|e| format!("corrupt write failed: {}", e))?;
-            }
-            file.sync_all()
-                .map_err(|e| format!("fsync after corrupt failed: {}", e))?;
             Ok(())
-        })();
-
-        let _ = run_cmd("dmsetup", &["resume", &state.dm_name]);
-        corrupt_result?;
-        info!("storage: corrupted {} bytes in {}", n, state.dm_name);
-        Ok(())
+        })
     }
 
-    async fn snapshot(&self, subject: &Subject) -> Result<String, String> {
-        let state = self.state_for(subject)?;
-        let counter = {
-            let mut c = self.corrupt_counter.lock().expect("poisoned counter lock");
-            // Reuse the counter so snapshot ids are deterministic under a seed.
-            let v = *c;
-            *c = c.wrapping_add(1);
-            v
-        };
-        let snap_id = format!("{}-snap-{}", state.dm_name, counter);
-        let snap_path = Self::snap_path(&state, &snap_id);
-
-        // Suspend so in-flight I/O settles before we copy the backing store.
-        run_cmd("dmsetup", &["suspend", &state.dm_name])
-            .map_err(|e| format!("dmsetup suspend failed: {}", e))?;
-        // Flush dirty pages from the mounted filesystem to the dm device first.
-        let _ = run_cmd("sync", &[]);
-        let copy = fs::copy(&state.backing_file, &snap_path);
-        let _ = run_cmd("dmsetup", &["resume", &state.dm_name]);
-        copy.map_err(|e| format!("snapshot failed: {}", e))?;
-
-        info!("storage: snapshot {} -> {}", state.dm_name, snap_id);
-        Ok(snap_id)
+    fn drop_writes<'a>(
+        &'a self,
+        subject: &'a Subject,
+        on: bool,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async move {
+            let state = self.state_for(subject)?;
+            let table = if on {
+                // Always-down + drop_writes: writes ACK but never hit the backing store.
+                Self::down_table(state.sectors, &state.loop_dev, &["drop_writes"])
+            } else {
+                Self::pass_through_table(state.sectors, &state.loop_dev)
+            };
+            self.reload_table(&state, &table)?;
+            debug!("storage: drop_writes={} for {}", on, state.dm_name);
+            Ok(())
+        })
     }
 
-    async fn restore(&self, subject: &Subject, snap_id: &str) -> Result<(), String> {
-        let state = self.state_for(subject)?;
-        let snap_path = Self::snap_path(&state, snap_id);
-        if !snap_path.exists() {
-            return Err(format!("snapshot {} not found", snap_id));
-        }
+    fn slow<'a>(
+        &'a self,
+        _subject: &'a Subject,
+        _delay_ms: u64,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async move {
+            Err(
+                "slow is not supported on dm-flakey (use deprive:disk for coarse I/O throttling)"
+                    .to_string(),
+            )
+        })
+    }
 
-        // Unmount so the page cache cannot serve stale data after we rewrite
-        // the backing file under the device.
-        run_cmd("umount", &[&state.host_mount.display().to_string()])
-            .map_err(|e| format!("umount before restore failed: {}", e))?;
+    fn corrupt<'a>(
+        &'a self,
+        subject: &'a Subject,
+        n: u64,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async move {
+            let state = self.state_for(subject)?;
+            let seed = self.seed.lock().expect("poisoned seed lock").unwrap_or(0);
+            let counter = {
+                let mut c = self.corrupt_counter.lock().expect("poisoned counter lock");
+                let v = *c;
+                *c = c.wrapping_add(1);
+                v
+            };
+            // Mix subject id + counter so concurrent subjects and successive calls
+            // draw independent streams from the same experiment seed.
+            let mixed = seed
+                .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                .wrapping_add(counter)
+                .wrapping_add(state.dm_name.len() as u64);
+            let mut rng = StdRng::seed_from_u64(mixed);
 
-        run_cmd("dmsetup", &["suspend", &state.dm_name])
-            .map_err(|e| format!("dmsetup suspend failed: {}", e))?;
-        let copy = fs::copy(&snap_path, &state.backing_file);
-        let _ = run_cmd("dmsetup", &["resume", &state.dm_name]);
-        if let Err(e) = copy {
-            // Best-effort remount so the subject is not left without a disk.
-            let dm_path = format!("/dev/mapper/{}", state.dm_name);
+            run_cmd("dmsetup", &["suspend", &state.dm_name])
+                .map_err(|e| format!("dmsetup suspend failed: {}", e))?;
+
+            let corrupt_result = (|| -> Result<(), String> {
+                let file_size = fs::metadata(&state.backing_file)
+                    .map_err(|e| format!("failed to stat backing file: {}", e))?
+                    .len();
+                if file_size == 0 {
+                    return Err("backing file is empty".to_string());
+                }
+                let mut file = OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&state.backing_file)
+                    .map_err(|e| format!("failed to open backing file: {}", e))?;
+                for _ in 0..n {
+                    let offset = rng.gen_range(0..file_size);
+                    file.seek(SeekFrom::Start(offset))
+                        .map_err(|e| format!("seek failed: {}", e))?;
+                    let mut buf = [0u8; 1];
+                    // Sparse holes read as zeros; still flip them so the file is dirtied.
+                    let _ = file.read_exact(&mut buf);
+                    file.seek(SeekFrom::Start(offset))
+                        .map_err(|e| format!("seek failed: {}", e))?;
+                    buf[0] ^= 0xff;
+                    file.write_all(&buf)
+                        .map_err(|e| format!("corrupt write failed: {}", e))?;
+                }
+                file.sync_all()
+                    .map_err(|e| format!("fsync after corrupt failed: {}", e))?;
+                Ok(())
+            })();
+
+            let _ = run_cmd("dmsetup", &["resume", &state.dm_name]);
+            corrupt_result?;
+            info!("storage: corrupted {} bytes in {}", n, state.dm_name);
+            Ok(())
+        })
+    }
+
+    fn snapshot<'a>(
+        &'a self,
+        subject: &'a Subject,
+    ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send + 'a>> {
+        Box::pin(async move {
+            let state = self.state_for(subject)?;
+            let counter = {
+                let mut c = self.corrupt_counter.lock().expect("poisoned counter lock");
+                // Reuse the counter so snapshot ids are deterministic under a seed.
+                let v = *c;
+                *c = c.wrapping_add(1);
+                v
+            };
+            let snap_id = format!("{}-snap-{}", state.dm_name, counter);
+            let snap_path = Self::snap_path(&state, &snap_id);
+
+            // Suspend so in-flight I/O settles before we copy the backing store.
+            run_cmd("dmsetup", &["suspend", &state.dm_name])
+                .map_err(|e| format!("dmsetup suspend failed: {}", e))?;
+            // Flush dirty pages from the mounted filesystem to the dm device first.
+            let _ = run_cmd("sync", &[]);
+            let copy = fs::copy(&state.backing_file, &snap_path);
+            let _ = run_cmd("dmsetup", &["resume", &state.dm_name]);
+            copy.map_err(|e| format!("snapshot failed: {}", e))?;
+
+            info!("storage: snapshot {} -> {}", state.dm_name, snap_id);
+            Ok(snap_id)
+        })
+    }
+
+    fn restore<'a>(
+        &'a self,
+        subject: &'a Subject,
+        snap_id: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async move {
+            let state = self.state_for(subject)?;
+            let snap_path = Self::snap_path(&state, snap_id);
+            if !snap_path.exists() {
+                return Err(format!("snapshot {} not found", snap_id));
+            }
+
+            // Unmount so the page cache cannot serve stale data after we rewrite
+            // the backing file under the device.
+            run_cmd("umount", &[&state.host_mount.display().to_string()])
+                .map_err(|e| format!("umount before restore failed: {}", e))?;
+
+            run_cmd("dmsetup", &["suspend", &state.dm_name])
+                .map_err(|e| format!("dmsetup suspend failed: {}", e))?;
+            let copy = fs::copy(&snap_path, &state.backing_file);
+            let _ = run_cmd("dmsetup", &["resume", &state.dm_name]);
+            if let Err(e) = copy {
+                // Best-effort remount so the subject is not left without a disk.
+                let dm_path = format!("/dev/mapper/{}", state.dm_name);
+                let _ = run_cmd(
+                    "mount",
+                    &[&dm_path, &state.host_mount.display().to_string()],
+                );
+                return Err(format!("restore copy failed: {}", e));
+            }
+
             let _ = run_cmd(
+                "blockdev",
+                &["--flushbufs", &format!("/dev/mapper/{}", state.dm_name)],
+            );
+            let dm_path = format!("/dev/mapper/{}", state.dm_name);
+            run_cmd(
                 "mount",
                 &[&dm_path, &state.host_mount.display().to_string()],
-            );
-            return Err(format!("restore copy failed: {}", e));
-        }
+            )
+            .map_err(|e| format!("remount after restore failed: {}", e))?;
+            let _ = run_cmd("chmod", &["777", &state.host_mount.display().to_string()]);
 
-        let _ = run_cmd(
-            "blockdev",
-            &["--flushbufs", &format!("/dev/mapper/{}", state.dm_name)],
-        );
-        let dm_path = format!("/dev/mapper/{}", state.dm_name);
-        run_cmd(
-            "mount",
-            &[&dm_path, &state.host_mount.display().to_string()],
-        )
-        .map_err(|e| format!("remount after restore failed: {}", e))?;
-        let _ = run_cmd("chmod", &["777", &state.host_mount.display().to_string()]);
-
-        info!("storage: restored {} from {}", state.dm_name, snap_id);
-        Ok(())
+            info!("storage: restored {} from {}", state.dm_name, snap_id);
+            Ok(())
+        })
     }
 }
 
