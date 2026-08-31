@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::str::FromStr;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum AccumulationMode {
@@ -78,10 +79,26 @@ impl Config {
     /// Validate invariants that normalization cannot fix. Call *before*
     /// [`Config::normalize_weights`].
     pub fn validate(&self) -> Result<(), String> {
+        if self.steps == 0 {
+            return Err("steps must be > 0: a fault schedule of zero steps is meaningless".to_string());
+        }
+
+        let mut valid_weights = 0usize;
         for (name, weight) in &self.fault_weights {
             if *weight < 0.0 {
                 return Err(format!("weight for '{}' is negative: {}", name, weight));
             }
+            if crate::domain::fault::Fault::from_str(name).is_ok() {
+                valid_weights += 1;
+            }
+        }
+
+        if valid_weights == 0 {
+            return Err(
+                "fault_weights contains no recognized fault names (pause, kill, deprive:<tier>); \
+                 the schedule would silently inject only 'pause'"
+                    .to_string(),
+            );
         }
 
         Ok(())
@@ -145,6 +162,31 @@ mod tests {
         let mut config = Config::default();
         config.fault_weights.insert("test".to_string(), -0.5);
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_config_validate_zero_steps() {
+        let mut config = Config::default();
+        config.steps = 0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_config_validate_no_recognized_faults() {
+        let mut config = Config::default();
+        config.fault_weights.clear();
+        config.fault_weights.insert("nope".to_string(), 1.0);
+        config.fault_weights.insert("also_invalid".to_string(), 1.0);
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_config_validate_recognized_faults_only() {
+        let mut config = Config::default();
+        config.fault_weights.clear();
+        config.fault_weights.insert("pause".to_string(), 1.0);
+        config.fault_weights.insert("deprive:cpu".to_string(), 1.0);
+        assert!(config.validate().is_ok());
     }
 
     #[test]
