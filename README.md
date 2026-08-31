@@ -60,8 +60,14 @@ dstest lets you write Lua scripts that define test subjects (Docker containers),
 
 ## Examples
 
+- `openapi.lua` - Drive sustained HTTP workload from an OpenAPI spec file
 - `oracle.lua` - Fault injection with oracle predicates and invariants
 - `link.lua` - Proxied network faults: latency, loss, partitions between subjects
+- `partition.lua` - Directional link partitions and latency/loss measured through a proxy
+- `clock.lua` - Virtual clock control: freeze, advance, offset, rate
+- `tcp.lua` - Raw TCP protocol exchange over `dstest.net.tcp`
+- `storage.lua` - Virtual disk faults: corrupt, snapshot, restore, I/O errors
+- `orchestrate.lua` - Full fault-schedule orchestration with `run_steps` and oracles
 - `pg.lua` - PostgreSQL: connect, create table, insert, query, close
 
 ## Documentation

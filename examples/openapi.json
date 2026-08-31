@@ -1,0 +1,33 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "httpbin surface used by dstest openapi example",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/get": {
+      "get": {
+        "summary": "Return GET request args, headers, origin",
+        "responses": { "200": { "description": "ok" } }
+      }
+    },
+    "/post": {
+      "post": {
+        "summary": "Return POST request data",
+        "responses": { "200": { "description": "ok" } }
+      }
+    },
+    "/headers": {
+      "get": {
+        "summary": "Return request headers",
+        "responses": { "200": { "description": "ok" } }
+      }
+    },
+    "/status/200": {
+      "get": {
+        "summary": "Return an HTTP 200",
+        "responses": { "200": { "description": "ok" } }
+      }
+    }
+  }
+}

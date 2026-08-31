@@ -129,7 +129,13 @@ Guaranteed reproducible for a given seed:
 
 | File | Demonstrates |
 |------|--------------|
+| [`examples/openapi.lua`](examples/openapi.lua) | OpenAPI-driven sustained HTTP workload (`dstest.workload.http` with an `openapi` spec) |
 | [`examples/oracle.lua`](examples/oracle.lua) | Fault injection with oracle predicates and invariants |
 | [`examples/httpbin.lua`](examples/httpbin.lua) | httpbin smoke: check a route, cut the link, verify failure, heal, verify recovery |
 | [`examples/link.lua`](examples/link.lua) | Proxied network faults: latency, loss, partitions between subjects |
+| [`examples/partition.lua`](examples/partition.lua) | Directional link partitions (`a->b`/`both`, `blackhole`/`reset`) and latency/loss, measured through a proxy |
+| [`examples/clock.lua`](examples/clock.lua) | Virtual clock control: freeze, advance, offset, rate against a pinned epoch |
+| [`examples/tcp.lua`](examples/tcp.lua) | Raw TCP protocol exchange over `dstest.net.tcp` |
+| [`examples/storage.lua`](examples/storage.lua) | Virtual disk faults: corrupt, snapshot, restore, I/O errors |
+| [`examples/orchestrate.lua`](examples/orchestrate.lua) | Full fault-schedule orchestration with `dstest.dst.run_steps`, weighted faults, and an oracle predicate |
 | [`examples/pg.lua`](examples/pg.lua) | PostgreSQL: connect, create table, insert, query, close |
