@@ -22,13 +22,19 @@
 //! ```
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use mlua::{Lua, Result, Table};
 
 use crate::adapters::lua::net::http::resolve_subject_http;
 use crate::application::context::BindingContext;
+
+/// Cache of parsed OpenAPI request lists, keyed by the spec path. Re-parsing
+/// a spec from disk on every `dstest.workload.http` call is avoidable work;
+/// a given spec path is immutable and its parsed request list never changes.
+static OPENAPI_CACHE: std::sync::LazyLock<Mutex<HashMap<String, Arc<Vec<HttpReq>>>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
 #[derive(Clone, Debug)]
 struct HttpReq {
@@ -101,50 +107,64 @@ pub fn register(lua: &Lua, workload: &Table, ctx: &BindingContext) -> Result<()>
             let rate: u64 = opts.get("rate").unwrap_or(10);
 
             // Build request list from either OpenAPI spec or manual requests table
-            let reqs: Vec<HttpReq> = if opts.get::<String>("openapi").is_ok() {
-                let openapi_path = opts.get::<String>("openapi").unwrap();
-                let spec = std::fs::read_to_string(&openapi_path).map_err(|e| {
-                    mlua::Error::RuntimeError(format!(
-                        "cannot read OpenAPI spec '{}': {}",
-                        openapi_path, e
-                    ))
-                })?;
-                parse_openapi(&spec)?
-            } else if let Ok(reqs_tbl) = opts.get::<Table>("requests") {
-                let mut reqs = Vec::new();
-                let len = reqs_tbl.raw_len();
-                for i in 1..=len {
-                    let entry: Table = reqs_tbl.raw_get(i as i64).map_err(|_| {
-                        mlua::Error::RuntimeError(format!("requests[{}] is not a table", i))
-                    })?;
-                    let method: String = entry.get("method").unwrap_or_else(|_| "GET".to_string());
-                    let path: String = entry.get("path").map_err(|_| {
-                        mlua::Error::RuntimeError("each request needs a 'path' field".to_string())
-                    })?;
-                    let body: Option<String> = entry.get("body").ok();
-                    let content_type: Option<String> = entry.get("content_type").ok();
-                    reqs.push(HttpReq {
-                        method,
-                        path,
-                        body,
-                        content_type,
-                    });
-                }
-                if reqs.is_empty() {
-                    return Err(mlua::Error::RuntimeError(
-                        "requests list is empty".to_string(),
-                    ));
-                }
-                reqs
-            } else {
-                // Default: GET /get
-                vec![HttpReq {
-                    method: "GET".to_string(),
-                    path: "/get".to_string(),
-                    body: None,
-                    content_type: None,
-                }]
-            };
+            let reqs: Arc<Vec<HttpReq>> =
+                if let Ok(openapi_path) = opts.get::<String>("openapi") {
+                    if let Some(cached) = OPENAPI_CACHE
+                        .lock()
+                        .expect("poisoned openapi cache")
+                        .get(&openapi_path)
+                    {
+                        Arc::clone(cached)
+                    } else {
+                        let spec = std::fs::read_to_string(&openapi_path).map_err(|e| {
+                            mlua::Error::RuntimeError(format!(
+                                "cannot read OpenAPI spec '{}': {}",
+                                openapi_path, e
+                            ))
+                        })?;
+                        let parsed = Arc::new(parse_openapi(&spec)?);
+                        OPENAPI_CACHE
+                            .lock()
+                            .expect("poisoned openapi cache")
+                            .insert(openapi_path, Arc::clone(&parsed));
+                        parsed
+                    }
+                } else if let Ok(reqs_tbl) = opts.get::<Table>("requests") {
+                    let mut reqs = Vec::new();
+                    let len = reqs_tbl.raw_len();
+                    for i in 1..=len {
+                        let entry: Table = reqs_tbl.raw_get(i as i64).map_err(|_| {
+                            mlua::Error::RuntimeError(format!("requests[{}] is not a table", i))
+                        })?;
+                        let method: String =
+                            entry.get("method").unwrap_or_else(|_| "GET".to_string());
+                        let path: String = entry.get("path").map_err(|_| {
+                            mlua::Error::RuntimeError("each request needs a 'path' field".to_string())
+                        })?;
+                        let body: Option<String> = entry.get("body").ok();
+                        let content_type: Option<String> = entry.get("content_type").ok();
+                        reqs.push(HttpReq {
+                            method,
+                            path,
+                            body,
+                            content_type,
+                        });
+                    }
+                    if reqs.is_empty() {
+                        return Err(mlua::Error::RuntimeError(
+                            "requests list is empty".to_string(),
+                        ));
+                    }
+                    Arc::new(reqs)
+                } else {
+                    // Default: GET /get
+                    Arc::new(vec![HttpReq {
+                        method: "GET".to_string(),
+                        path: "/get".to_string(),
+                        body: None,
+                        content_type: None,
+                    }])
+                };
 
             let (host, timeout, retries, delay) = {
                 let state = state.lock().expect("poisoned engine state lock");
@@ -239,7 +259,7 @@ pub fn register(lua: &Lua, workload: &Table, ctx: &BindingContext) -> Result<()>
 
             // Per-method breakdown
             let breakdown = lua.create_table()?;
-            for req in &reqs {
+            for req in reqs.iter() {
                 let mt = lua.create_table()?;
                 mt.set("ok", method_ok.get(&req.method).copied().unwrap_or(0))?;
                 mt.set("failed", method_fail.get(&req.method).copied().unwrap_or(0))?;
