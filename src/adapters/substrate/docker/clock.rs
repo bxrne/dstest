@@ -53,12 +53,14 @@ const CLOCK_SHIM_C: &str = r#"
 
 static int (*real_clock_gettime)(clockid_t, struct timespec *);
 static time_t (*real_time)(time_t *);
+static int (*real_gettimeofday)(struct timeval *, void *);
 static const char *ctl_path;
 
 __attribute__((constructor))
 static void dstest_clock_init(void) {
     real_clock_gettime = dlsym(RTLD_NEXT, "clock_gettime");
     real_time = dlsym(RTLD_NEXT, "time");
+    real_gettimeofday = dlsym(RTLD_NEXT, "gettimeofday");
     ctl_path = getenv("DSTEST_CLOCK_CTL");
 }
 
@@ -95,6 +97,18 @@ time_t time(time_t *t) {
         return tp.tv_sec;
     }
     return real_time(t);
+}
+
+int gettimeofday(struct timeval *tv, void *tz) {
+    if (!real_gettimeofday) dstest_clock_init();
+    struct timespec tp;
+    if (tv && clock_gettime(CLOCK_REALTIME, &tp) == 0) {
+        tv->tv_sec = (time_t)tp.tv_sec;
+        tv->tv_usec = (suseconds_t)(tp.tv_nsec / 1000);
+        /* tz is obsolete and ignored; leaving it untouched matches the kernel. */
+        return 0;
+    }
+    return real_gettimeofday(tv, tz);
 }
 "#;
 
@@ -277,7 +291,11 @@ impl DockerClock {
             .map_err(|e| format!("failed to create clock build container: {}", e))?;
         let build_id = container.id.clone();
 
-        let result = async {
+        // Bound the whole build (yum install needs network access and can be
+        // slow on a cold cache; without a bound a hung registry or mirror
+        // stalls every subject that opts into a virtual clock).
+        const BUILD_TIMEOUT: Duration = Duration::from_secs(600);
+        let build = async {
             conn.start_container(&build_id, None::<StartContainerOptions>)
                 .await
                 .map_err(|e| format!("failed to start clock build container: {}", e))?;
@@ -300,9 +318,17 @@ impl DockerClock {
             }
 
             info!("virtual clock: shim ready at {}", dir.display());
-            Ok(())
-        }
-        .await;
+            Ok::<(), String>(())
+        };
+        let build_result = match tokio::time::timeout(BUILD_TIMEOUT, build)
+            .await
+        {
+            Ok(res) => res,
+            Err(_) => Err(format!(
+                "clock shim build timed out after {}s (check network / registry access)",
+                BUILD_TIMEOUT.as_secs()
+            )),
+        };
 
         // Always clean up the build container.
         let options = RemoveContainerOptions {
@@ -314,7 +340,7 @@ impl DockerClock {
             warn!("failed to remove clock build container: {}", e);
         }
 
-        result?;
+        build_result?;
         Ok(dir)
     }
 }
