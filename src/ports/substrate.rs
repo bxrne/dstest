@@ -26,6 +26,18 @@ use crate::domain::fault::Fault;
 use crate::domain::subject::{ExecResult, HostedSubject, LogEntry, Subject, SubjectStatus};
 use crate::ports::components::{ClockControl, NetworkControl, StorageControl};
 
+/// A boxed pinned async method result, the object-safe representation used
+/// across the [`Substrate`] trait. Factored out so each method signature
+/// reads as a plain `Output` type instead of the full nested boxed future.
+type BoxedFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+/// The boxed async result of [`Substrate::inspect`]: a future yielding a
+/// substrate-rendered Lua value or an error. Kept as its own alias because
+/// the `Box<dyn ToLua>` nested in the `Result` trips clippy's
+/// `type_complexity` lint when written inline.
+type InspectFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<Box<dyn ToLua + Send>, String>> + Send + 'a>>;
+
 /// Render a substrate-specific value onto a Lua value. Each substrate owns
 /// the shape of its `inspect` result (and any other associated type it
 /// surfaces to Lua) and implements this trait so the bindings stay substrate
@@ -67,45 +79,37 @@ pub trait Substrate: Send + Sync + 'static {
         &'a self,
         name: &'a str,
         data: &'a (dyn Any + Sync),
-    ) -> Pin<Box<dyn Future<Output = Result<HostedSubject, String>> + Send + 'a>>;
+    ) -> BoxedFuture<'a, Result<HostedSubject, String>>;
 
     fn affect<'a>(
         &'a self,
         subject: &'a Subject,
         fault: &'a Fault,
-    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>>;
+    ) -> BoxedFuture<'a, Result<(), String>>;
 
-    fn clear_faults<'a>(
-        &'a self,
-        subject: &'a Subject,
-    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>>;
+    fn clear_faults<'a>(&'a self, subject: &'a Subject) -> BoxedFuture<'a, Result<(), String>>;
 
-    fn teardown<'a>(
-        &'a self,
-        subject: Subject,
-    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>>;
+    fn teardown<'a>(&'a self, subject: Subject) -> BoxedFuture<'a, Result<(), String>>;
 
     fn logs<'a>(
         &'a self,
         subject: &'a Subject,
         opts: Box<dyn Any + Send + Sync>,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<LogEntry>, String>> + Send + 'a>>;
+    ) -> BoxedFuture<'a, Result<Vec<LogEntry>, String>>;
 
-    fn inspect<'a>(
-        &'a self,
-        subject: &'a Subject,
-    ) -> Pin<Box<dyn Future<Output = Result<Box<dyn ToLua + Send>, String>> + Send + 'a>>;
+    /// Inspect a subject, returning a substrate-specific value rendered for
+    /// Lua. The `ToLua` box is factored into [`InspectFuture`] so the return
+    /// type stays below clippy's `type_complexity` threshold.
+    fn inspect<'a>(&'a self, subject: &'a Subject) -> InspectFuture<'a>;
 
     fn exec<'a>(
         &'a self,
         subject: &'a Subject,
         cmd: &'a [String],
-    ) -> Pin<Box<dyn Future<Output = Result<ExecResult, String>> + Send + 'a>>;
+    ) -> BoxedFuture<'a, Result<ExecResult, String>>;
 
-    fn status<'a>(
-        &'a self,
-        subject: &'a Subject,
-    ) -> Pin<Box<dyn Future<Output = Result<SubjectStatus, String>> + Send + 'a>>;
+    fn status<'a>(&'a self, subject: &'a Subject)
+    -> BoxedFuture<'a, Result<SubjectStatus, String>>;
 
     fn clock(&self) -> &dyn ClockControl;
     fn network(&self) -> &dyn NetworkControl;
