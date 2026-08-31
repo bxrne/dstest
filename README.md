@@ -97,6 +97,10 @@ Then instruct your assistant to "use the dstest skill" when writing or debugging
   with `DOCKER_HOST` pointed at the Podman socket; `docker` may be aliased to
   `podman`)
 - Rust 1.85+ (uses 2024 edition)
+- [Zig](https://ziglang.org/) when building from source: `build.rs`
+  cross-compiles the virtual-clock shim (`shim/clock.c`) to a Linux x86-64
+  ELF with `zig cc`. Install via `nix profile install nixpkgs#zig` or your
+  package manager. Not needed for `cargo install` from a prebuilt crate.
 
 ## License
 

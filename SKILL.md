@@ -83,7 +83,19 @@ link:heal()
 
 ### Storage Faults (`dstest.storage.*`)
 
-> **Removed:** the `dm-flakey` storage backend required root privileges and has been removed. Storage fault injection may return in a future unprivileged implementation (e.g. FUSE-based).
+Storage fault injection uses a loop-backed ext4 filesystem on a device-mapper
+`dm-flakey` device, bind-mounted into the subject. It requires root + the
+`dm-flakey` kernel module on the host (see `examples/storage.lua`).
+
+| Function | Effect |
+|----------|--------|
+| `dstest.storage.error(id, on)` | Toggle EIO on all I/O |
+| `dstest.storage.drop_writes(id, on)` | ACK writes but discard them |
+| `dstest.storage.corrupt(id, n)` | Flip `n` bytes (seeded, deterministic) |
+| `dstest.storage.snapshot(id)` | Snapshot backing store → id |
+| `dstest.storage.restore(id, snap)` | Restore a snapshot |
+| `dstest.storage.slow(id, ms)` | Not supported on dm-flakey |
+| `dstest.storage.attach(id, opts)` | Rejected — configure at setup |
 
 ## Configuration
 
@@ -228,9 +240,15 @@ dstest.error("failure occurred")
 
 | File | Demonstrates |
 |------|--------------|
+| [`examples/openapi.lua`](examples/openapi.lua) | OpenAPI-driven sustained HTTP workload (`dstest.workload.http` with an `openapi` spec) |
 | [`examples/oracle.lua`](examples/oracle.lua) | Fault injection with oracle predicates and invariants |
 | [`examples/httpbin.lua`](examples/httpbin.lua) | httpbin smoke: check a route, cut the link, verify failure, heal, verify recovery |
 | [`examples/link.lua`](examples/link.lua) | Proxied network faults: latency, loss, partitions between subjects |
+| [`examples/partition.lua`](examples/partition.lua) | Directional link partitions (`a->b`/`both`, `blackhole`/`reset`) and latency/loss, measured through a proxy |
+| [`examples/clock.lua`](examples/clock.lua) | Virtual clock control: freeze, advance, offset, rate against a pinned epoch |
+| [`examples/tcp.lua`](examples/tcp.lua) | Raw TCP protocol exchange over `dstest.net.tcp` |
+| [`examples/storage.lua`](examples/storage.lua) | Virtual disk faults: corrupt, snapshot, restore, I/O errors |
+| [`examples/orchestrate.lua`](examples/orchestrate.lua) | Full fault-schedule orchestration with `run_steps` and oracles |
 | [`examples/pg.lua`](examples/pg.lua) | PostgreSQL: connect, create table, insert, query, close |
 
 ## Writing Scripts
@@ -249,3 +267,5 @@ end
 
 - Docker daemon running
 - Rust 1.85+ (uses 2024 edition)
+- [Zig](https://ziglang.org/) to build from source (cross-compiles the
+  virtual-clock shim in `build.rs`)
