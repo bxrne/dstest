@@ -352,11 +352,16 @@ impl Substrate for Docker {
                     .await
                 {
                     Ok(c) => c,
+                    // Name collision (Docker returns 409; podman returns 500
+                    // with this message): remove the stale dstest-managed
+                    // container holding the name, then retry once.
                     Err(BollardError::DockerResponseServerError {
-                        status_code: 409, ..
-                    }) => {
-                        // Name collision: remove the stale dstest-managed container
-                        // holding this name, then retry once.
+                        status_code,
+                        message,
+                        ..
+                    }) if status_code == 409
+                        || message.to_lowercase().contains("already in use") =>
+                    {
                         self.remove_stale(name).await?;
                         conn.create_container(Some(options), container_config)
                             .await

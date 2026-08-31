@@ -103,10 +103,21 @@ impl UserData for TcpConnection {
 
         methods.add_method("close", |_, conn, ()| {
             let writer = conn.writer.lock().expect("poisoned lock");
-            writer
-                .shutdown(Shutdown::Both)
-                .map_err(|e| mlua::Error::RuntimeError(e.to_string()))?;
-            Ok(())
+            // A peer that already closed the connection (e.g. after
+            // `Connection: close`) makes `shutdown` fail with
+            // NotConnected/BrokenPipe; closing such a socket is a no-op, not
+            // an error.
+            match writer.shutdown(Shutdown::Both) {
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::NotConnected | std::io::ErrorKind::BrokenPipe
+                    ) =>
+                {
+                    Ok(())
+                }
+                other => other.map_err(|e| mlua::Error::RuntimeError(e.to_string())),
+            }
         });
 
         methods.add_method("addr", |_, conn, ()| Ok(conn.addr.clone()));
@@ -158,8 +169,18 @@ pub fn register(lua: &Lua, dstest: &Table, ctx: &BindingContext) -> Result<()> {
             (host, cfg.http_timeout_secs)
         };
 
-        let host_ip = host.split(':').next().unwrap_or(&host);
-        let addr = format!("{}:{}", host_ip, port);
+        // `host` already carries the mapped host port (e.g. `localhost:58080`),
+        // so dial it directly. The requested container `port` is only a
+        // fallback when the address has no port component.
+        let addr = if host
+            .rsplit_once(':')
+            .map(|(_, p)| p.parse::<u16>().is_ok())
+            .unwrap_or(false)
+        {
+            host
+        } else {
+            format!("{}:{}", host, port)
+        };
 
         let socket_addr = addr
             .to_socket_addrs()

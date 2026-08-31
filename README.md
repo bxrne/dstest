@@ -64,7 +64,7 @@ dstest lets you write Lua scripts that define test subjects (Docker containers),
 - `oracle.lua` - Fault injection with oracle predicates and invariants
 - `link.lua` - Proxied network faults: latency, loss, partitions between subjects
 - `partition.lua` - Directional link partitions and latency/loss measured through a proxy
-- `clock.lua` - Virtual clock control: freeze, advance, offset, rate
+- `clock.lua` - Virtual clock control: freeze, advance, offset (manual clock)
 - `tcp.lua` - Raw TCP protocol exchange over `dstest.net.tcp`
 - `storage.lua` - Virtual disk faults: corrupt, snapshot, restore, I/O errors
 - `orchestrate.lua` - Full fault-schedule orchestration with `run_steps` and oracles
@@ -91,17 +91,40 @@ cp SKILL.md ~/.agents/skills/dstest/SKILL.md
 
 Then instruct your assistant to "use the dstest skill" when writing or debugging chaos experiments.
 
+## Environment-limited examples
+
+Four examples need a real Linux Docker environment that a macOS + podman-machine
+host cannot provide:
+
+| Example      | Why it fails on podman-machine (macOS)                                    |
+|--------------|-----------------------------------------------------------------------------|
+| `httpbin.lua`   | The link proxy's bridge IP (`10.88.x.x`) is unreachable from the host process |
+| `link.lua`      | Same bridge-reachability requirement                                       |
+| `partition.lua` | Same bridge-reachability requirement                                       |
+| `storage.lua`   | Needs root + device-mapper (`losetup`, `dmsetup`, `mkfs.ext4`, `mount`) and the `dm-flakey` kernel module |
+
+The harness host process must be able to dial the Docker bridge IP that the link
+proxy binds; from inside the macOS podman-machine VM the sandbox bridge is not
+routable, and the VM kernel does not expose `dm-flakey`. These are environment
+limitations, not example bugs.
+
+These four examples are not exercised by the automated checks on this host and no
+in-repo workaround exists: running them requires a real Linux Docker host where
+the bridge IP is reachable from the `dstest` process and root/device-mapper with
+`dm-flakey` is available. They are documented for completeness and are expected
+to fail here.
+
 ## Requirements
 
 - A Docker-compatible daemon reachable over `DOCKER_HOST` (Docker or Podman
   with `DOCKER_HOST` pointed at the Podman socket; `docker` may be aliased to
   `podman`)
 - Rust 1.85+ (uses 2024 edition)
-- [Zig](https://ziglang.org/) only when building on a non-Linux host (e.g.
-  macOS): `build.rs` cross-compiles the virtual-clock shim (`shim/clock.c`) to
-  a Linux x86-64 ELF with `zig cc`. On Linux the native `cc` is used and Zig
-  is not required. Install via `nix profile install nixpkgs#zig` or your
-  package manager.
+- [Zig](https://ziglang.org/): `build.rs` cross-compiles the virtual-clock
+  shim (`shim/clock.c`) to a Linux x86-64 ELF pinned to the glibc 2.17
+  baseline with `zig cc`, so it loads into any glibc-based subject. Zig is
+  required on every build platform, including Linux and CI. Install via
+  `nix profile install nixpkgs#zig` or your package manager.
 
 ## License
 

@@ -17,6 +17,9 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: stable
-      
+
+      - name: Install Zig (build clock shim)
+        uses: goto-bus-stop/setup-zig@v2
+
       - name: Publish to crates.io
         run: cargo publish --allow-dirty --token ${{ secrets.CARGO_REGISTRY_TOKEN }}

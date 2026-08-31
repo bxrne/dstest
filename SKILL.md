@@ -36,7 +36,9 @@ cargo install --path .
 
 - **Virtual clocks**: pin a subject's `CLOCK_REALTIME` to an epoch and advance
   it deterministically via `dstest.clock.virtual(s)` (see `dstest.clock` in
-  [DOCS.md](DOCS.md)).
+  [DOCS.md](DOCS.md)). The manual clock supports `advance`, `set_offset`, and
+  `freeze`; `set_rate`/`release` are unsupported (time only moves when you
+  advance it).
 - **Proxied network faults**: `dstest.net.link(a, b, port)` adds latency, loss,
   and partitions between two subjects (see `dstest.net` in [DOCS.md](DOCS.md)).
 - **Seeded workloads**: `dstest.random.*` (int, float, bool, choice, shuffle)
@@ -245,7 +247,7 @@ dstest.error("failure occurred")
 | [`examples/httpbin.lua`](examples/httpbin.lua) | httpbin smoke: check a route, cut the link, verify failure, heal, verify recovery |
 | [`examples/link.lua`](examples/link.lua) | Proxied network faults: latency, loss, partitions between subjects |
 | [`examples/partition.lua`](examples/partition.lua) | Directional link partitions (`a->b`/`both`, `blackhole`/`reset`) and latency/loss, measured through a proxy |
-| [`examples/clock.lua`](examples/clock.lua) | Virtual clock control: freeze, advance, offset, rate against a pinned epoch |
+| [`examples/clock.lua`](examples/clock.lua) | Virtual clock control: freeze, advance, offset on a manual clock pinned to an epoch |
 | [`examples/tcp.lua`](examples/tcp.lua) | Raw TCP protocol exchange over `dstest.net.tcp` |
 | [`examples/storage.lua`](examples/storage.lua) | Virtual disk faults: corrupt, snapshot, restore, I/O errors |
 | [`examples/orchestrate.lua`](examples/orchestrate.lua) | Full fault-schedule orchestration with `run_steps` and oracles |
@@ -267,6 +269,15 @@ end
 
 - Docker daemon running
 - Rust 1.85+ (uses 2024 edition)
-- [Zig](https://ziglang.org/) only when building on a non-Linux host (e.g.
-  macOS): `build.rs` cross-compiles the virtual-clock shim to a Linux x86-64
-  ELF. On Linux the native `cc` is used and Zig is not required.
+- [Zig](https://ziglang.org/): `build.rs` cross-compiles the virtual-clock
+  shim to a Linux x86-64 ELF pinned to the glibc 2.17 baseline. Required on
+  every build platform, including Linux and CI.
+
+## Environment-limited examples
+
+`examples/httpbin.lua`, `examples/link.lua`, `examples/partition.lua`, and
+`examples/storage.lua` need a real Linux Docker host (bridge-IP reachability
+from the harness process, and root + device-mapper with the `dm-flakey` module).
+On a macOS + podman-machine host these fail for environmental reasons, not bugs,
+and they are not exercised by the automated checks. There is no in-repo
+workaround; see the "Environment-limited examples" section of the README.

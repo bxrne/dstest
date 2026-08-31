@@ -40,9 +40,7 @@ local function plan()
         coroutine.yield("initial", function() end)
         coroutine.yield("advance +5s", function() vc:advance(5000) end)
         coroutine.yield("offset +1h", function() vc:set_offset(3600000) end)
-        coroutine.yield("rate x2", function() vc:set_rate(2.0) end)
         coroutine.yield("freeze", function() vc:freeze() end)
-        coroutine.yield("release", function() vc:release() end)
     end)
 end
 

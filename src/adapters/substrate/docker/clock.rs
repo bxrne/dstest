@@ -163,13 +163,19 @@ impl DockerClock {
         Ok(())
     }
 
-    /// Ensure the embedded clock shim `.so` exists in the assets dir, writing
-    /// it out from the bytes compiled by `build.rs` on first use. No container
-    /// or runtime toolchain is involved; the shim ships inside the binary.
+    /// Ensure the embedded clock shim `.so` is present and current in the
+    /// assets dir. The embedded bytes from `build.rs` are the source of truth;
+    /// a stale cached copy with different bytes is replaced so an outdated
+    /// shim (e.g. from an earlier glibc baseline) is never mounted into a
+    /// subject. Written atomically via a temp file + rename.
     fn ensure_assets(&self) -> Result<PathBuf, String> {
         let dir = Self::assets_dir();
         let so_path = dir.join("dstest_clock.so");
-        if so_path.exists() {
+        if so_path.exists()
+            && fs::read(&so_path)
+                .map(|cur| cur == CLOCK_SHIM_SO)
+                .unwrap_or(false)
+        {
             return Ok(dir);
         }
 
