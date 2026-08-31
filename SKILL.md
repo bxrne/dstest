@@ -267,5 +267,6 @@ end
 
 - Docker daemon running
 - Rust 1.85+ (uses 2024 edition)
-- [Zig](https://ziglang.org/) to build from source (cross-compiles the
-  virtual-clock shim in `build.rs`)
+- [Zig](https://ziglang.org/) only when building on a non-Linux host (e.g.
+  macOS): `build.rs` cross-compiles the virtual-clock shim to a Linux x86-64
+  ELF. On Linux the native `cc` is used and Zig is not required.
