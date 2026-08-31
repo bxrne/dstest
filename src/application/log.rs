@@ -293,7 +293,7 @@ mod tests {
         let markers = log
             .events()
             .iter()
-            .filter(|e| matches!(e, ExperimentEvent::LogOverflow { .. }))
+            .filter(|e| matches!(e, ExperimentEvent::LogOverflow))
             .count();
         assert_eq!(markers, 1);
         assert_eq!(log.events().len(), EVENT_LOG_CAP + 1);

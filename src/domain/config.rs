@@ -167,6 +167,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::field_reassign_with_default)] // fixture built via Default
     fn test_config_validate_zero_steps() {
         let mut config = Config::default();
         config.steps = 0;
