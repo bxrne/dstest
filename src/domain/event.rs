@@ -92,4 +92,7 @@ pub enum ExperimentEvent {
         /// Fault round the check was about, when applicable (predicates).
         round: Option<usize>,
     },
+    /// The event log hit its safety cap. Emitted once so a runaway growth is
+    /// surfaced rather than silently truncating the record.
+    LogOverflow,
 }

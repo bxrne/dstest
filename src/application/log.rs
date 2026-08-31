@@ -9,6 +9,11 @@ use std::time::Duration;
 
 use crate::domain::event::{ExperimentEvent, FaultClass};
 
+/// Safety cap on retained events. The log keeps full history so the oracle
+/// can recompute reports from any point; this is not a normal operating
+/// limit but a runaway guard against pathological growth.
+const EVENT_LOG_CAP: usize = 1_000_000;
+
 /// Scope/execution metrics derived from the event log.
 #[derive(Default, Debug, Clone)]
 pub struct Metrics {
@@ -152,6 +157,9 @@ pub struct EventLog {
     events: Vec<ExperimentEvent>,
     metrics: Metrics,
     blast: BlastRadius,
+    /// Set once the safety cap is hit, so only a single `LogOverflow` marker
+    /// is recorded rather than one per dropped event.
+    overflow_reported: bool,
 }
 
 impl EventLog {
@@ -159,10 +167,26 @@ impl EventLog {
         Self::default()
     }
 
-    /// Append an event, feeding the inline projections.
+    /// Append an event, feeding the inline projections. Bounded by
+    /// [`EVENT_LOG_CAP`]: on overflow a single `LogOverflow` marker is
+    /// recorded and subsequent events are dropped, so a pathological growth
+    /// is surfaced instead of silently truncating the record.
     pub fn push(&mut self, ev: ExperimentEvent) -> &mut Self {
         self.metrics.apply(&ev);
         self.blast.apply(&ev);
+
+        if self.events.len() >= EVENT_LOG_CAP {
+            if !self.overflow_reported {
+                self.overflow_reported = true;
+                tracing::error!(
+                    "event log exceeded cap of {} events; dropping further events",
+                    EVENT_LOG_CAP
+                );
+                self.events.push(ExperimentEvent::LogOverflow);
+            }
+            return self;
+        }
+
         self.events.push(ev);
         self
     }
@@ -254,5 +278,24 @@ mod tests {
             });
         assert_eq!(log.events().len(), 2);
         assert_eq!(log.metrics().scenarios, 1);
+    }
+
+    #[test]
+    fn event_log_marks_overflow_exactly_once() {
+        let mut log = EventLog::new();
+        // Fill to the cap, then push past it: only the single marker should be
+        // recorded and further events dropped.
+        for _ in 0..EVENT_LOG_CAP {
+            log.push(ExperimentEvent::ScenarioStarted);
+        }
+        log.push(ExperimentEvent::ScenarioStarted); // triggers overflow
+        log.push(ExperimentEvent::ScenarioStarted); // dropped
+        let markers = log
+            .events()
+            .iter()
+            .filter(|e| matches!(e, ExperimentEvent::LogOverflow { .. }))
+            .count();
+        assert_eq!(markers, 1);
+        assert_eq!(log.events().len(), EVENT_LOG_CAP + 1);
     }
 }
