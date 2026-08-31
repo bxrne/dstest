@@ -137,9 +137,9 @@ pub async fn run_step(
             .ids_for_config(&handle)
             .iter()
             .filter(|id| {
-                !s.subjects
+                s.subjects
                     .find(id)
-                    .is_none_or(|r| r.active_faults.is_empty())
+                    .is_some_and(|r| !r.active_faults.is_empty())
             })
             .count();
         s.log.push(ExperimentEvent::BlastAffected {
