@@ -90,9 +90,11 @@ fn parse_openapi(spec: &str) -> std::result::Result<Vec<HttpReq>, mlua::Error> {
 
 pub fn register(lua: &Lua, workload: &Table, ctx: &BindingContext) -> Result<()> {
     let state = Arc::clone(&ctx.state);
+    let client = ctx.http.clone();
 
     let run_fn = lua.create_async_function(move |lua, (id, opts): (String, Table)| {
         let state = Arc::clone(&state);
+        let client = client.clone();
 
         async move {
             let duration_secs: u64 = opts.get("duration_secs").unwrap_or(10);
@@ -149,13 +151,6 @@ pub fn register(lua: &Lua, workload: &Table, ctx: &BindingContext) -> Result<()>
                 resolve_subject_http(&state, &id)?
             };
 
-            let client = reqwest::Client::builder()
-                .timeout(Duration::from_secs(timeout))
-                .build()
-                .map_err(|e| {
-                    mlua::Error::RuntimeError(format!("failed to create HTTP client: {}", e))
-                })?;
-
             let start = Instant::now();
             let end = start + Duration::from_secs(duration_secs);
             let interval = Duration::from_millis(1000 / rate.max(1));
@@ -177,15 +172,17 @@ pub fn register(lua: &Lua, workload: &Table, ctx: &BindingContext) -> Result<()>
 
                 let mut success = false;
                 for attempt in 0..retries {
-                    let mut builder = client.request(
-                        req.method.parse().map_err(|e| {
-                            mlua::Error::RuntimeError(format!(
-                                "invalid method '{}': {}",
-                                req.method, e
-                            ))
-                        })?,
-                        &url,
-                    );
+                    let mut builder = client
+                        .request(
+                            req.method.parse().map_err(|e| {
+                                mlua::Error::RuntimeError(format!(
+                                    "invalid method '{}': {}",
+                                    req.method, e
+                                ))
+                            })?,
+                            &url,
+                        )
+                        .timeout(Duration::from_secs(timeout));
 
                     if let Some(ref ct) = req.content_type {
                         builder = builder.header("content-type", ct.as_str());

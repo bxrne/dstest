@@ -27,6 +27,12 @@ pub struct BindingContext {
     /// Seeded workload RNG for `dstest.random.*` (separate stream from the
     /// fault tree's RNG, so workload draws don't affect the fault schedule).
     pub workload_rng: Arc<Mutex<Option<rand::rngs::StdRng>>>,
+    /// Shared HTTP client reused across `dstest.net.http` and the HTTP
+    /// workload. `reqwest::Client` pools connections internally; building one
+    /// per request discards that pool and pays TLS/connection setup each call.
+    /// Per-request timeouts are applied on the `RequestBuilder`, so the
+    /// client itself carries no global timeout.
+    pub http: reqwest::Client,
     pub lua: Lua,
 }
 
@@ -38,6 +44,7 @@ impl BindingContext {
             resolver,
             substrate: Arc::new(RwLock::new(None)),
             workload_rng: Arc::new(Mutex::new(None)),
+            http: reqwest::Client::new(),
             lua: Lua::new(),
         }
     }

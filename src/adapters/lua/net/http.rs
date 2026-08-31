@@ -31,10 +31,12 @@ pub fn resolve_subject_http(state: &AppState, id: &str) -> mlua::Result<(String,
 
 pub fn register(lua: &Lua, dstest: &Table, ctx: &BindingContext) -> Result<()> {
     let state = Arc::clone(&ctx.state);
+    let client = ctx.http.clone();
 
     let http_fn =
         lua.create_async_function(move |lua, (id, method, path): (String, String, String)| {
             let state = Arc::clone(&state);
+            let client = client.clone();
 
             async move {
                 let (host, timeout, retries, delay) = {
@@ -43,12 +45,6 @@ pub fn register(lua: &Lua, dstest: &Table, ctx: &BindingContext) -> Result<()> {
                 };
 
                 let url = format!("http://{host}{path}");
-                let client = reqwest::Client::builder()
-                    .timeout(Duration::from_secs(timeout))
-                    .build()
-                    .map_err(|e| {
-                        mlua::Error::RuntimeError(format!("failed to create HTTP client: {}", e))
-                    })?;
 
                 let req_method: reqwest::Method = method
                     .parse()
@@ -57,7 +53,10 @@ pub fn register(lua: &Lua, dstest: &Table, ctx: &BindingContext) -> Result<()> {
                 let mut last_err = None;
 
                 for attempt in 0..retries {
-                    match client.request(req_method.clone(), &url).send().await {
+                    let req = client
+                        .request(req_method.clone(), &url)
+                        .timeout(Duration::from_secs(timeout));
+                    match req.send().await {
                         Ok(resp) => {
                             let status = resp.status().as_u16();
                             let body = resp.text().await.map_err(|e| {
